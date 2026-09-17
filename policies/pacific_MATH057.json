@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "institution": "University of the Pacific",
+  "course_code": "MATH057",
+  "course_title": "Applied Differential Equations I",
+  "source_alias": "Dropbox/Courses_Pacific/MATH057_ApplDE1",
+  "copy_excluded": true,
+  "retained_text": [],
+  "retained_pdfs": [],
+  "literal_redactions": [],
+  "provenance": [
+    {
+      "key": "marottaAppliedDifferentialEquationsSlides2011",
+      "entry_type": "unpublished",
+      "author": "Marotta, Sebastian M.",
+      "title": "Applied Differential Equations I: Lecture Slides",
+      "year": "2011",
+      "source_path": "Lecture1.pps",
+      "note": "Representative attachment for a 30-file lecture-slide collection. PowerPoint metadata identifies smarotta as author; no explicit reuse license was detected."
+    },
+    {
+      "key": "pacificMath057IntegrationReview",
+      "entry_type": "unpublished",
+      "title": "Techniques of Integration: Strategy and Examples",
+      "source_path": "ReviewIntegration.pdf",
+      "note": "Course handout with no embedded author or explicit reuse license detected."
+    }
+  ],
+  "exclusions": [
+    {
+      "pattern": "Lecture*.pps",
+      "reason": "third-party lecture slides attributed by document metadata to Sebastian M. Marotta"
+    },
+    {
+      "pattern": "ReviewIntegration.pdf",
+      "reason": "third-party course handout with no explicit reuse license"
+    }
+  ]
+}

@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "institution": "University of the Pacific",
+  "course_code": "ENGR219",
+  "course_title": "Numerical Methods for Engineering",
+  "source_alias": "Dropbox/Courses_Pacific/ENGR219",
+  "copy_excluded": true,
+  "retained_text": [
+    "Homework/**/*.tex",
+    "Homework/**/*.m",
+    "Homework/**/*.txt",
+    "Homework/**/*.bib"
+  ],
+  "retained_pdfs": [
+    "Syllabus.pdf"
+  ],
+  "literal_redactions": [
+    {
+      "label": "student name",
+      "value": "Eugene J. Ragasa"
+    }
+  ],
+  "provenance": [
+    {
+      "key": "pacificENGR219Syllabus2009",
+      "entry_type": "unpublished",
+      "title": "ENGR219: Numerical Methods for Engineering — Syllabus",
+      "year": "2009",
+      "source_path": "Syllabus.pdf",
+      "note": "Institutional course record; instructor and author are not identified in the document."
+    },
+    {
+      "key": "fordIntroductionNumericalLinearAlgebra",
+      "entry_type": "book",
+      "author": "Ford, William",
+      "title": "Introduction to Numerical Linear Algebra",
+      "source_path": "[Ford] - Introduction To Numerical Linear Algebra.pdf",
+      "note": "Private reference copy; publication and reuse-license status require review."
+    }
+  ],
+  "exclusions": [
+    {
+      "pattern": "**/*solution*",
+      "reason": "third-party solution material"
+    },
+    {
+      "pattern": "[[]Ford[]]*",
+      "reason": "third-party textbook"
+    },
+    {
+      "pattern": "Homework/**/*.pdf",
+      "reason": "generated student PDF omitted; sanitized source retained"
+    },
+    {
+      "pattern": "Homework/**/*.aux",
+      "reason": "generated LaTeX artifact"
+    },
+    {
+      "pattern": "Homework/**/*.log",
+      "reason": "generated LaTeX artifact"
+    },
+    {
+      "pattern": "Homework/**/*.blg",
+      "reason": "generated LaTeX artifact"
+    },
+    {
+      "pattern": "Homework/**/*.bbl",
+      "reason": "generated LaTeX artifact"
+    },
+    {
+      "pattern": "Homework/**/*.gz",
+      "reason": "generated LaTeX artifact"
+    },
+    {
+      "pattern": "Homework/**/octave-core",
+      "reason": "application crash dump"
+    },
+    {
+      "pattern": "AdditionalMaterials/**",
+      "reason": "third-party course material"
+    },
+    {
+      "pattern": "Assignments/**",
+      "reason": "third-party course material"
+    },
+    {
+      "pattern": "Labs/**",
+      "reason": "third-party course material"
+    },
+    {
+      "pattern": "LectureNotes/**",
+      "reason": "third-party course material"
+    },
+    {
+      "pattern": "MATLAB/**",
+      "reason": "third-party software pack"
+    },
+    {
+      "pattern": "MatLabFunctions/**",
+      "reason": "third-party course material"
+    },
+    {
+      "pattern": "*.zip",
+      "reason": "archive requiring separate rights and content review"
+    },
+    {
+      "pattern": "*.xls",
+      "reason": "binary requiring separate rights and content review"
+    },
+    {
+      "pattern": "*.mat",
+      "reason": "binary requiring separate ownership review"
+    }
+  ]
+}

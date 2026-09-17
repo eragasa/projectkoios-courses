@@ -1,0 +1,143 @@
+{
+  "schema_version": 1,
+  "institution": "University of the Pacific",
+  "course_code": "MATH157",
+  "course_title": "Applied Differential Equations II",
+  "source_alias": "Dropbox/Courses_Pacific/MATH157-ApplDE2",
+  "copy_excluded": true,
+  "retained_text": [
+    "example20130211.m",
+    "example20130213.m",
+    "books.txt",
+    "heateq1/*.m",
+    "hw3/*.m",
+    "notes*/*.m",
+    "waveeq/*.m"
+  ],
+  "retained_pdfs": [],
+  "literal_redactions": [
+    {
+      "label": "student name",
+      "value": "Eugene J. Ragasa"
+    }
+  ],
+  "provenance": [
+    {
+      "key": "beltukovMath157Demonstration2013",
+      "entry_type": "unpublished",
+      "author": "Beltukov, Aleksei",
+      "title": "Math 157 Demonstration: Solve the Heat Equation",
+      "year": "2013",
+      "source_path": "hw1/sec2hw2.m",
+      "note": "Private course source; no explicit reuse license detected."
+    },
+    {
+      "key": "beltukovLinearAlgebraPDE2013",
+      "entry_type": "unpublished",
+      "author": "Beltukov, Aleksei",
+      "title": "Linear Algebra Solution of Linear PDE",
+      "year": "2013",
+      "source_path": "hw2/handout2.pdf",
+      "note": "Private course handout; no explicit reuse license detected."
+    },
+    {
+      "key": "beltukovFourierSeries2013",
+      "entry_type": "unpublished",
+      "author": "Beltukov, Aleksei",
+      "title": "Fourier Series",
+      "year": "2013",
+      "source_path": "hw3/handout3.pdf",
+      "note": "Private course handout; no explicit reuse license detected."
+    },
+    {
+      "key": "beltukovHilbertSpaces2013",
+      "entry_type": "unpublished",
+      "author": "Beltukov, Aleksei",
+      "title": "Introduction to Hilbert Spaces",
+      "year": "2013",
+      "source_path": "hw4/handout4.pdf",
+      "note": "Private course handout; no explicit reuse license detected."
+    },
+    {
+      "key": "beltukovHeatEquation2D2013",
+      "entry_type": "unpublished",
+      "author": "Beltukov, Aleksei",
+      "title": "Heat Equation in Two Dimensions",
+      "year": "2013",
+      "source_path": "hw5/handout5.pdf",
+      "note": "Private course handout; no explicit reuse license detected."
+    },
+    {
+      "key": "beltukovVariationalPDE2013",
+      "entry_type": "unpublished",
+      "author": "Beltukov, Aleksei",
+      "title": "Variational Approach to PDE",
+      "year": "2013",
+      "source_path": "hw6/handout6.pdf",
+      "note": "Private course handout; no explicit reuse license detected."
+    },
+    {
+      "key": "beltukovLaplacianEigendecomposition2015",
+      "entry_type": "unpublished",
+      "author": "Beltukov, Aleksei",
+      "title": "Eigendecomposition of the Laplacian",
+      "year": "2015",
+      "source_path": "Beltukov_PDE2015/handout5.pdf",
+      "note": "Private course handout; no explicit reuse license detected."
+    }
+  ],
+  "exclusions": [
+    {
+      "pattern": "Beltukov_PDE2015/**",
+      "reason": "third-party course or reference material"
+    },
+    {
+      "pattern": "ref_eigen/**",
+      "reason": "third-party course or reference material"
+    },
+    {
+      "pattern": "hw1/sec2hw2.m",
+      "reason": "source identifies Aleksei Beltukov as its author"
+    },
+    {
+      "pattern": "hw*/*.pdf",
+      "reason": "third-party handout or generated student PDF"
+    },
+    {
+      "pattern": "lecturenotes/*.tex",
+      "reason": "authorship metadata is contradictory and requires review"
+    },
+    {
+      "pattern": "lecturenotes/*.pdf",
+      "reason": "generated PDF omitted; private source retained locally"
+    },
+    {
+      "pattern": "lecturenotes/*.aux",
+      "reason": "generated LaTeX artifact"
+    },
+    {
+      "pattern": "lecturenotes/*.log",
+      "reason": "generated LaTeX artifact"
+    },
+    {
+      "pattern": "lecturenotes/*.gz",
+      "reason": "generated LaTeX artifact"
+    },
+    {
+      "pattern": "**/*.asv",
+      "reason": "generated MATLAB autosave artifact"
+    },
+    {
+      "pattern": "**/*.zip",
+      "reason": "archive requiring separate ownership and privacy review"
+    },
+    {
+      "pattern": "**/*.jpg",
+      "reason": "binary image requiring separate metadata and ownership review"
+    },
+    {
+      "pattern": "**/*.pdf",
+      "reason": "third-party or generated PDF not explicitly allowlisted"
+    }
+  ]
+}

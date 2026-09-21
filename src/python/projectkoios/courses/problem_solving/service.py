@@ -6,11 +6,11 @@ from dataclasses import asdict, dataclass
 
 from .models import (
     ComputationPlan,
-    CorpusRole,
     EvidencePassage,
     ProblemMaterial,
     ProblemMode,
     ProblemSolvingError,
+    RetrievalPurpose,
     RetrievalRequest,
     ReviewStatus,
     SolutionCandidate,
@@ -64,7 +64,7 @@ class ProblemSolvingService:
         return RetrievalRequest(
             query=problem.statement,
             problem_id=problem.problem_id,
-            allowed_roles=(CorpusRole.EVIDENCE,),
+            purpose=RetrievalPurpose.PROBLEM_SOLVING,
             excluded_passage_ids=(problem.problem_id,),
             limit=self._configuration.retrieval_limit,
         )
@@ -143,9 +143,15 @@ class ProblemSolvingService:
             raise ProblemSolvingError("retrieval exceeded its configured limit")
         passage_ids: list[str] = []
         for item in evidence:
-            if item.corpus_role is not CorpusRole.EVIDENCE:
+            if item.corpus_role not in request.admitted_roles:
                 raise ProblemSolvingError(
-                    "retrieval returned non-evidence corpus material"
+                    "retrieval returned material not admitted for "
+                    "problem solving"
+                )
+            if request.purpose not in item.admitted_purposes:
+                raise ProblemSolvingError(
+                    "retrieval returned evidence without problem-solving "
+                    "admission"
                 )
             passage_ids.append(item.passage_id)
         if len(set(passage_ids)) != len(passage_ids):

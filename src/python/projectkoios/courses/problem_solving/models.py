@@ -11,10 +11,17 @@ class ProblemSolvingError(ValueError):
 
 
 class CorpusRole(StrEnum):
-    EVIDENCE = "evidence"
+    THEORY_EVIDENCE = "theory_evidence"
+    SOURCE_WORKED_EXAMPLE = "source_worked_example"
+    SOURCE_SOLUTION = "source_solution"
     PROBLEM_MATERIAL = "problem_material"
     GENERATED_SOLUTION = "generated_solution"
     REVIEWED_SOLUTION = "reviewed_solution"
+
+
+class RetrievalPurpose(StrEnum):
+    PROBLEM_SOLVING = "problem_solving"
+    LECTURE_AUTHORING = "lecture_authoring"
 
 
 class ProblemMode(StrEnum):
@@ -81,17 +88,33 @@ class EvidencePassage:
     text: str
     source: SourceSpan
     corpus_role: CorpusRole
+    admitted_purposes: tuple[RetrievalPurpose, ...]
 
     def __post_init__(self) -> None:
         if not self.passage_id or not self.text.strip():
             raise ProblemSolvingError("evidence identity and text are required")
+        if not isinstance(self.corpus_role, CorpusRole):
+            raise ProblemSolvingError("evidence corpus role must be explicit")
+        if len(set(self.admitted_purposes)) != len(
+            self.admitted_purposes
+        ):
+            raise ProblemSolvingError(
+                "evidence purpose admissions must be unique"
+            )
+        if any(
+            not isinstance(purpose, RetrievalPurpose)
+            for purpose in self.admitted_purposes
+        ):
+            raise ProblemSolvingError(
+                "evidence purpose admissions must be explicit"
+            )
 
 
 @dataclass(frozen=True)
 class RetrievalRequest:
     query: str
     problem_id: str
-    allowed_roles: tuple[CorpusRole, ...]
+    purpose: RetrievalPurpose
     excluded_passage_ids: tuple[str, ...]
     limit: int
 
@@ -100,10 +123,16 @@ class RetrievalRequest:
             raise ProblemSolvingError(
                 "retrieval query and problem id are required"
             )
-        if self.allowed_roles != (CorpusRole.EVIDENCE,):
-            raise ProblemSolvingError("retrieval must be evidence-only")
+        if self.purpose is not RetrievalPurpose.PROBLEM_SOLVING:
+            raise ProblemSolvingError(
+                "problem-solving retrieval purpose is required"
+            )
         if self.limit < 1:
             raise ProblemSolvingError("retrieval limit must be positive")
+
+    @property
+    def admitted_roles(self) -> tuple[CorpusRole, ...]:
+        return (CorpusRole.THEORY_EVIDENCE,)
 
 
 @dataclass(frozen=True)

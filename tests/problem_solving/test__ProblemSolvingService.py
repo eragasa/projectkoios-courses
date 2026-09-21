@@ -14,6 +14,7 @@ from projectkoios.courses.problem_solving import (
     ProblemSolverConfiguration,
     ProblemSolvingError,
     ProblemSolvingService,
+    RetrievalPurpose,
     ReviewStatus,
     SolutionDraft,
     SourceSpan,
@@ -46,7 +47,10 @@ def problem(
 
 
 def evidence(
-    role: CorpusRole = CorpusRole.EVIDENCE,
+    role: CorpusRole = CorpusRole.THEORY_EVIDENCE,
+    admitted_purposes: tuple[RetrievalPurpose, ...] = (
+        RetrievalPurpose.PROBLEM_SOLVING,
+    ),
 ) -> tuple[EvidencePassage, ...]:
     return (
         EvidencePassage(
@@ -54,12 +58,14 @@ def evidence(
             text="Entropy is evaluated along a reversible path.",
             source=SourceSpan(SOURCE, 695, 700),
             corpus_role=role,
+            admitted_purposes=admitted_purposes,
         ),
         EvidencePassage(
             passage_id="passage:isothermal-ideal-gas",
             text="For an isothermal ideal gas, integrate nR dV/V.",
             source=SourceSpan(SOURCE, 697, 698),
-            corpus_role=CorpusRole.EVIDENCE,
+            corpus_role=CorpusRole.THEORY_EVIDENCE,
+            admitted_purposes=admitted_purposes,
         ),
     )
 
@@ -174,9 +180,21 @@ def test__plan_retrieval__allows_only_authoritative_evidence() -> None:
 
     request = solver.plan_retrieval(problem())
 
-    assert request.allowed_roles == (CorpusRole.EVIDENCE,)
+    assert request.purpose is RetrievalPurpose.PROBLEM_SOLVING
+    assert request.admitted_roles == (CorpusRole.THEORY_EVIDENCE,)
     assert request.excluded_passage_ids == ("YF13Ed.20.27",)
     assert request.query == problem().statement
+
+
+def test__retrieval_request__rejects_non_solving_purpose() -> None:
+    solver, _, _ = service()
+    request = solver.plan_retrieval(problem())
+
+    with pytest.raises(
+        ProblemSolvingError,
+        match="problem-solving retrieval purpose",
+    ):
+        replace(request, purpose=RetrievalPurpose.LECTURE_AUTHORING)
 
 
 def test__solve__returns_unreviewed_analytical_candidate() -> None:
@@ -192,24 +210,35 @@ def test__solve__returns_unreviewed_analytical_candidate() -> None:
     assert verifier.plan is None
 
 
-def test__solve__rejects_problem_material_as_evidence() -> None:
-    contaminated = evidence(CorpusRole.PROBLEM_MATERIAL)
+@pytest.mark.parametrize(
+    "role",
+    (
+        CorpusRole.SOURCE_WORKED_EXAMPLE,
+        CorpusRole.SOURCE_SOLUTION,
+        CorpusRole.PROBLEM_MATERIAL,
+        CorpusRole.GENERATED_SOLUTION,
+        CorpusRole.REVIEWED_SOLUTION,
+    ),
+)
+def test__solve__rejects_material_not_admitted_for_problem_solving(
+    role: CorpusRole,
+) -> None:
+    contaminated = evidence(role)
     solver, _, _ = service(passages=contaminated)
 
     with pytest.raises(
         ProblemSolvingError,
-        match="non-evidence corpus material",
+        match="not admitted for problem solving",
     ):
         solver.solve(problem())
 
 
-def test__solve__rejects_generated_solution_as_evidence() -> None:
-    contaminated = evidence(CorpusRole.GENERATED_SOLUTION)
-    solver, _, _ = service(passages=contaminated)
+def test__solve__rejects_theory_without_problem_solving_admission() -> None:
+    solver, _, _ = service(passages=evidence(admitted_purposes=()))
 
     with pytest.raises(
         ProblemSolvingError,
-        match="non-evidence corpus material",
+        match="without problem-solving admission",
     ):
         solver.solve(problem())
 

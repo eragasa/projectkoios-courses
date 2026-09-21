@@ -16,6 +16,7 @@ from projectkoios.courses.problem_solving import (
     ProblemMaterial,
     ProblemMode,
     ProblemSolvingError,
+    RetrievalPurpose,
     SourceSpan,
     text_sha256,
 )
@@ -76,7 +77,8 @@ def evidence() -> tuple[EvidencePassage, ...]:
             passage_id="evidence:1",
             text="Entropy is a state function.",
             source=SourceSpan("source:sha256:" + "b" * 64, 8, 9),
-            corpus_role=CorpusRole.EVIDENCE,
+            corpus_role=CorpusRole.THEORY_EVIDENCE,
+            admitted_purposes=(RetrievalPurpose.PROBLEM_SOLVING,),
         ),
     )
 

@@ -11,6 +11,7 @@ authors = [
 
 [project.scripts]
 koios-course-sanitize = "projectkoios.courses.cli:main"
+koios-course-propose-conversion-intent = "projectkoios.courses.problem_solving.conversion_intent_cli:main"
 
 [build-system]
 requires = ["setuptools>=61.0.0"]
@@ -24,6 +25,7 @@ namespaces = true
 "projectkoios.courses" = ["py.typed"]
 
 [project.optional-dependencies]
+computation = ["sympy==1.14.0"]
 dev = ["pytest>=8.0", "ruff>=0.8", "mypy>=1.13"]
 
 [tool.pytest.ini_options]

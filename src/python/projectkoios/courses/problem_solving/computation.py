@@ -4,8 +4,11 @@ import ast
 import hashlib
 import json
 import os
+import selectors
+import signal
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,6 +39,9 @@ _FORBIDDEN_NAMES = frozenset(
         "__import__",
     }
 )
+_OUTPUT_READ_CHUNK_BYTES = 8192
+_PROCESS_TERMINATION_GRACE_SECONDS = 0.2
+
 _FORBIDDEN_NODES = (
     ast.AsyncFor,
     ast.AsyncFunctionDef,
@@ -83,6 +89,15 @@ class PythonVerifierConfiguration:
             raise ProblemSolvingError("verifier byte bounds must be positive")
 
 
+@dataclass(frozen=True)
+class _ProcessCapture:
+    returncode: int
+    stdout: bytes
+    stderr: bytes
+    timed_out: bool
+    output_exceeded: bool
+
+
 class DeterministicPythonComputationVerifier:
     """Runs a restricted script under an externally configured sandbox."""
 
@@ -114,33 +129,24 @@ class DeterministicPythonComputationVerifier:
                 "PATH": os.environ.get("PATH", ""),
                 "PYTHONHASHSEED": str(plan.seed),
             }
-            try:
-                completed = subprocess.run(
-                    command,
-                    cwd=directory,
-                    env=environment,
-                    capture_output=True,
-                    check=False,
-                    timeout=plan.timeout_seconds,
-                )
-            except subprocess.TimeoutExpired as error:
-                output = (error.stdout or b"") + b"\0" + (
-                    error.stderr or b""
-                )
-                return ComputationResult(
-                    plan_identity=plan.identity,
-                    outcome=VerificationOutcome.FAILED,
-                    result_summary="computation exceeded its timeout",
-                    output_sha256=hashlib.sha256(output).hexdigest(),
-                    analytical_agreement=None,
-                    findings=("subprocess timeout",),
-                )
+            process = subprocess.Popen(
+                command,
+                cwd=directory,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+            capture = self._capture_process_output(
+                process,
+                timeout_seconds=plan.timeout_seconds,
+            )
 
-        combined = completed.stdout + b"\0" + completed.stderr
-        output_sha256 = hashlib.sha256(combined).hexdigest()
-        if len(completed.stdout) + len(completed.stderr) > (
-            self._configuration.maximum_output_bytes
-        ):
+        output_sha256 = self._output_sha256(
+            capture.stdout,
+            capture.stderr,
+        )
+        if capture.output_exceeded:
             return ComputationResult(
                 plan_identity=plan.identity,
                 outcome=VerificationOutcome.FAILED,
@@ -149,23 +155,30 @@ class DeterministicPythonComputationVerifier:
                 analytical_agreement=None,
                 findings=("output byte bound exceeded",),
             )
-        if completed.returncode != 0:
+        if capture.timed_out:
+            return ComputationResult(
+                plan_identity=plan.identity,
+                outcome=VerificationOutcome.FAILED,
+                result_summary="computation exceeded its timeout",
+                output_sha256=output_sha256,
+                analytical_agreement=None,
+                findings=("subprocess timeout",),
+            )
+        if capture.returncode != 0:
             return ComputationResult(
                 plan_identity=plan.identity,
                 outcome=VerificationOutcome.FAILED,
                 result_summary="computation process failed",
                 output_sha256=output_sha256,
                 analytical_agreement=None,
-                findings=(
-                    f"subprocess exit status {completed.returncode}",
-                ),
+                findings=(f"subprocess exit status {capture.returncode}",),
             )
         try:
-            payload = json.loads(completed.stdout.decode("utf-8"))
+            payload = json.loads(capture.stdout.decode("utf-8"))
             summary = payload["result_summary"]
             agreement = payload["analytical_agreement"]
             findings = payload.get("findings", [])
-        except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+        except KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError:
             return ComputationResult(
                 plan_identity=plan.identity,
                 outcome=VerificationOutcome.INCONCLUSIVE,
@@ -197,6 +210,103 @@ class DeterministicPythonComputationVerifier:
             analytical_agreement=agreement,
             findings=tuple(findings),
         )
+
+    def _capture_process_output(
+        self,
+        process: subprocess.Popen[bytes],
+        *,
+        timeout_seconds: int,
+    ) -> _ProcessCapture:
+        if process.stdout is None or process.stderr is None:
+            self._terminate_process(process)
+            raise ProblemSolvingError(
+                "computation output pipes are unavailable"
+            )
+
+        output = {"stdout": bytearray(), "stderr": bytearray()}
+        selector = selectors.DefaultSelector()
+        streams = (process.stdout, process.stderr)
+        for name, stream in zip(output, streams, strict=True):
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, name)
+
+        deadline = time.monotonic() + timeout_seconds
+        timed_out = False
+        output_exceeded = False
+        stopped = False
+        try:
+            while selector.get_map():
+                if not stopped and time.monotonic() >= deadline:
+                    timed_out = True
+                    stopped = True
+                    self._terminate_process(process)
+                wait_seconds = 0.05
+                if not stopped:
+                    wait_seconds = max(
+                        0.0,
+                        min(wait_seconds, deadline - time.monotonic()),
+                    )
+                for key, _ in selector.select(wait_seconds):
+                    retained = sum(len(value) for value in output.values())
+                    remaining = (
+                        self._configuration.maximum_output_bytes - retained
+                    )
+                    chunk = os.read(
+                        key.fd,
+                        min(_OUTPUT_READ_CHUNK_BYTES, remaining + 1),
+                    )
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    target = output[str(key.data)]
+                    target.extend(chunk[:remaining])
+                    if len(chunk) > remaining and not output_exceeded:
+                        output_exceeded = True
+                        stopped = True
+                        self._terminate_process(process)
+            if process.poll() is None:
+                process.wait()
+        finally:
+            selector.close()
+            for stream in streams:
+                stream.close()
+            if process.poll() is None:
+                self._terminate_process(process)
+
+        return _ProcessCapture(
+            returncode=process.returncode,
+            stdout=bytes(output["stdout"]),
+            stderr=bytes(output["stderr"]),
+            timed_out=timed_out,
+            output_exceeded=output_exceeded,
+        )
+
+    @staticmethod
+    def _terminate_process(process: subprocess.Popen[bytes]) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=_PROCESS_TERMINATION_GRACE_SECONDS)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+
+    @staticmethod
+    def _output_sha256(stdout: bytes, stderr: bytes) -> str:
+        digest = hashlib.sha256()
+        digest.update(stdout)
+        digest.update(b"\0")
+        digest.update(stderr)
+        return digest.hexdigest()
 
     def _validate_plan(self, plan: ComputationPlan) -> None:
         if plan.runtime_identity != self._configuration.runtime_identity:

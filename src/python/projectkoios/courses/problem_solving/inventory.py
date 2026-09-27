@@ -10,6 +10,7 @@ from .models import (
     ProblemSolvingError,
     SourceSpan,
     text_sha256,
+    validate_problem_identity,
 )
 
 
@@ -51,8 +52,9 @@ class InventoryConfiguration:
     tags: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if not self.book_id or self.chapter < 1:
-            raise ProblemSolvingError("book and chapter identity are required")
+        validate_problem_identity(self.book_id)
+        if self.chapter < 1:
+            raise ProblemSolvingError("chapter identity must be positive")
         SourceSpan(self.source_identity, 1, 1)
         if self.anchor_font_size <= 0 or self.anchor_font_size_tolerance < 0:
             raise ProblemSolvingError("anchor font configuration is invalid")
@@ -81,8 +83,9 @@ class ProblemInventoryEntry:
     source: SourceSpan
 
     def __post_init__(self) -> None:
-        if not self.problem_id or not self.source_label:
-            raise ProblemSolvingError("problem inventory identity is required")
+        validate_problem_identity(self.problem_id)
+        if not self.source_label:
+            raise ProblemSolvingError("problem source label is required")
         if not self.statement.strip():
             raise ProblemSolvingError("problem statement is empty")
         if self.statement_sha256 != text_sha256(self.statement):

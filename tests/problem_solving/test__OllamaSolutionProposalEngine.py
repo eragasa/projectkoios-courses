@@ -37,6 +37,10 @@ def response(value: object) -> JsonResponse:
     return JsonResponse(json.dumps(value).encode("utf-8"))
 
 
+def raw_response(value: bytes) -> JsonResponse:
+    return JsonResponse(value)
+
+
 def configuration(directory: Path) -> OllamaProposalConfiguration:
     directory.chmod(0o700)
     return OllamaProposalConfiguration(
@@ -110,11 +114,7 @@ def test__propose__archives_request_response_and_receipt(
     engine = OllamaSolutionProposalEngine(configuration(archive))
     responses = (
         response(
-            {
-                "models": [
-                    {"name": "test-model:1", "digest": MODEL_DIGEST}
-                ]
-            }
+            {"models": [{"name": "test-model:1", "digest": MODEL_DIGEST}]}
         ),
         response({"version": "0.34.2"}),
         response(proposal_response()),
@@ -144,11 +144,7 @@ def test__propose__archives_request_response_and_receipt(
 
     replay_identity_responses = (
         response(
-            {
-                "models": [
-                    {"name": "test-model:1", "digest": MODEL_DIGEST}
-                ]
-            }
+            {"models": [{"name": "test-model:1", "digest": MODEL_DIGEST}]}
         ),
         response({"version": "0.34.2"}),
     )
@@ -173,11 +169,7 @@ def test__propose__accepts_structured_output_in_thinking_channel(
     generated["response"] = ""
     responses = (
         response(
-            {
-                "models": [
-                    {"name": "test-model:1", "digest": MODEL_DIGEST}
-                ]
-            }
+            {"models": [{"name": "test-model:1", "digest": MODEL_DIGEST}]}
         ),
         response({"version": "0.34.2"}),
         response(generated),
@@ -215,11 +207,7 @@ def test__propose__uses_configured_external_computation_source(
     generated = proposal_response()
     responses = (
         response(
-            {
-                "models": [
-                    {"name": "test-model:1", "digest": MODEL_DIGEST}
-                ]
-            }
+            {"models": [{"name": "test-model:1", "digest": MODEL_DIGEST}]}
         ),
         response({"version": "0.34.2"}),
         response(generated),
@@ -233,9 +221,10 @@ def test__propose__uses_configured_external_computation_source(
     request_path = next(archive.glob("*.request.json"))
     request_record = json.loads(request_path.read_text())
     prompt_record = json.loads(request_record["prompt"])
-    assert prompt_record["requirements"][
-        "computation_source_authority"
-    ] == "configured_external"
+    assert (
+        prompt_record["requirements"]["computation_source_authority"]
+        == "configured_external"
+    )
     receipt_path = next(archive.glob("*.receipt.json"))
     receipt = json.loads(receipt_path.read_text())
     assert receipt["computation_source"] == {
@@ -267,11 +256,7 @@ def test__propose__rejects_model_code_when_external_source_is_configured(
     generated["response"] = json.dumps(proposal)
     responses = (
         response(
-            {
-                "models": [
-                    {"name": "test-model:1", "digest": MODEL_DIGEST}
-                ]
-            }
+            {"models": [{"name": "test-model:1", "digest": MODEL_DIGEST}]}
         ),
         response({"version": "0.34.2"}),
         response(generated),
@@ -308,11 +293,7 @@ def test__propose__rejects_new_numeric_result_from_model(
     generated["response"] = json.dumps(proposal)
     responses = (
         response(
-            {
-                "models": [
-                    {"name": "test-model:1", "digest": MODEL_DIGEST}
-                ]
-            }
+            {"models": [{"name": "test-model:1", "digest": MODEL_DIGEST}]}
         ),
         response({"version": "0.34.2"}),
         response(generated),
@@ -348,13 +329,147 @@ def test__propose__rejects_model_identity_mismatch(tmp_path: Path) -> None:
         patch(
             "urllib.request.urlopen",
             return_value=response(
-                {
-                    "models": [
-                        {"name": "test-model:1", "digest": "c" * 64}
-                    ]
-                }
+                {"models": [{"name": "test-model:1", "digest": "c" * 64}]}
             ),
         ),
         pytest.raises(ProblemSolvingError, match="model identity"),
     ):
         engine.propose(problem(), evidence())
+
+
+def test__propose__rejects_streamed_http_body_over_bound(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "archive"
+    archive.mkdir(mode=0o700)
+    configured = replace(
+        configuration(archive),
+        maximum_http_response_bytes=256,
+    )
+    responses = (
+        response(
+            {"models": [{"name": "test-model:1", "digest": MODEL_DIGEST}]}
+        ),
+        response({"version": "0.34.2"}),
+        raw_response(b"x" * 257),
+    )
+
+    with (
+        patch("urllib.request.urlopen", side_effect=responses),
+        pytest.raises(ProblemSolvingError, match="exceeds its byte limit"),
+    ):
+        OllamaSolutionProposalEngine(configured).propose(problem(), evidence())
+
+    assert not tuple(archive.glob("*.response.json"))
+    assert not tuple(archive.glob("*.receipt.json"))
+
+
+def test__propose__fails_closed_on_malformed_http_response(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "archive"
+    archive.mkdir(mode=0o700)
+    responses = (
+        response(
+            {"models": [{"name": "test-model:1", "digest": MODEL_DIGEST}]}
+        ),
+        response({"version": "0.34.2"}),
+        raw_response(b"not-json"),
+    )
+
+    with (
+        patch("urllib.request.urlopen", side_effect=responses),
+        pytest.raises(ProblemSolvingError, match="output contract"),
+    ):
+        OllamaSolutionProposalEngine(configuration(archive)).propose(
+            problem(), evidence()
+        )
+
+    assert not tuple(archive.glob("*.receipt.json"))
+
+
+def test__configuration__rejects_loopback_userinfo_escape(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "archive"
+    archive.mkdir(mode=0o700)
+    values = configuration(archive).__dict__ | {
+        "endpoint": "http://127.0.0.1:11434@example.invalid"
+    }
+
+    with pytest.raises(ProblemSolvingError, match="endpoint must be local"):
+        OllamaProposalConfiguration(**values)
+
+
+def test__propose__rejects_response_symlink_race(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "archive"
+    archive.mkdir(mode=0o700)
+    outside = tmp_path / "outside.json"
+    outside.write_text("sentinel")
+    calls = 0
+
+    def urlopen(*args: object, **kwargs: object) -> JsonResponse:
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        if calls == 1:
+            return response(
+                {"models": [{"name": "test-model:1", "digest": MODEL_DIGEST}]}
+            )
+        if calls == 2:
+            return response({"version": "0.34.2"})
+        request_path = next(archive.glob("*.request.json"))
+        response_name = request_path.name.replace(
+            ".request.json",
+            ".response.json",
+        )
+        (archive / response_name).symlink_to(outside)
+        return response(proposal_response())
+
+    with (
+        patch("urllib.request.urlopen", side_effect=urlopen),
+        pytest.raises(ProblemSolvingError, match="archive"),
+    ):
+        OllamaSolutionProposalEngine(configuration(archive)).propose(
+            problem(), evidence()
+        )
+
+    assert outside.read_text() == "sentinel"
+    assert not tuple(archive.glob("*.receipt.json"))
+
+
+def test__propose__rejects_replaced_archive_parent_before_write(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "archive"
+    archive.mkdir(mode=0o700)
+    displaced = tmp_path / "displaced"
+    calls = 0
+
+    def urlopen(*args: object, **kwargs: object) -> JsonResponse:
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        if calls == 1:
+            return response(
+                {"models": [{"name": "test-model:1", "digest": MODEL_DIGEST}]}
+            )
+        if calls == 2:
+            return response({"version": "0.34.2"})
+        archive.rename(displaced)
+        archive.mkdir(mode=0o700)
+        return response(proposal_response())
+
+    with (
+        patch("urllib.request.urlopen", side_effect=urlopen),
+        pytest.raises(ProblemSolvingError, match="archive directory changed"),
+    ):
+        OllamaSolutionProposalEngine(configuration(archive)).propose(
+            problem(), evidence()
+        )
+
+    assert not tuple(archive.iterdir())
+    assert len(tuple(displaced.glob("*.request.json"))) == 1
+    assert not tuple(displaced.glob("*.response.json"))

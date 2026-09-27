@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -10,6 +9,11 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from .archive import ProposalArchive
+from .bounded_http import (
+    read_bounded_response,
+    validate_loopback_endpoint,
+)
 from .models import (
     AnalyticalWork,
     ComputationPlan,
@@ -18,6 +22,7 @@ from .models import (
     ProblemMode,
     ProblemSolvingError,
     SolutionDraft,
+    validate_problem_identity,
 )
 
 _NUMERIC_LITERAL_RE = re.compile(
@@ -46,6 +51,7 @@ class OllamaProposalConfiguration:
     computation_timeout_seconds: int
     archive_directory: Path
     configured_computation_sources: tuple[tuple[str, str], ...] = ()
+    maximum_http_response_bytes: int = 131_072
 
     def __post_init__(self) -> None:
         prompt_digest = hashlib.sha256(
@@ -53,8 +59,7 @@ class OllamaProposalConfiguration:
         ).hexdigest()
         if prompt_digest != self.system_prompt_sha256:
             raise ProblemSolvingError("system prompt identity mismatch")
-        if not self.endpoint.startswith("http://127.0.0.1:"):
-            raise ProblemSolvingError("Ollama endpoint must be local")
+        validate_loopback_endpoint(self.endpoint)
         if len(self.model_digest) != 64:
             raise ProblemSolvingError("Ollama model digest is invalid")
         if self.temperature < 0 or self.seed < 0 or self.top_k < 1:
@@ -65,6 +70,10 @@ class OllamaProposalConfiguration:
             raise ProblemSolvingError("Ollama token bounds must be positive")
         if self.timeout_seconds < 1 or self.computation_timeout_seconds < 1:
             raise ProblemSolvingError("proposal timeout must be positive")
+        if not 1 <= self.maximum_http_response_bytes <= 1_048_576:
+            raise ProblemSolvingError(
+                "Ollama HTTP response byte bound is invalid"
+            )
         if not self.computation_runtime_identity:
             raise ProblemSolvingError(
                 "computation runtime identity is required"
@@ -74,20 +83,21 @@ class OllamaProposalConfiguration:
                 "computation dependency lock identity is required"
             )
         computation_ids = tuple(
-            problem_id
-            for problem_id, _ in self.configured_computation_sources
+            problem_id for problem_id, _ in self.configured_computation_sources
         )
         if len(set(computation_ids)) != len(computation_ids):
             raise ProblemSolvingError(
                 "configured computation identities must be unique"
             )
         if any(
-            not problem_id or not source.strip()
-            for problem_id, source in self.configured_computation_sources
+            not source.strip()
+            for _, source in self.configured_computation_sources
         ):
             raise ProblemSolvingError(
                 "configured computation sources must be complete"
             )
+        for problem_id in computation_ids:
+            validate_problem_identity(problem_id)
         if (
             self.archive_directory.is_symlink()
             or not self.archive_directory.is_dir()
@@ -106,6 +116,7 @@ class OllamaSolutionProposalEngine:
 
     def __init__(self, configuration: OllamaProposalConfiguration) -> None:
         self._configuration = configuration
+        self._archive = ProposalArchive(configuration.archive_directory)
 
     def propose(
         self,
@@ -116,19 +127,19 @@ class OllamaSolutionProposalEngine:
         request_payload = self._request_payload(problem, evidence)
         request_bytes = self._canonical_bytes(request_payload)
         request_digest = hashlib.sha256(request_bytes).hexdigest()
-        request_path = (
-            self._configuration.archive_directory
-            / f"{problem.problem_id}.{request_digest}.request.json"
+        request_path = self._archive.child(
+            f"{problem.problem_id}.{request_digest}.request.json"
         )
-        self._write_or_confirm(request_path, request_bytes)
+        self._archive.write_or_confirm(request_path, request_bytes)
 
-        response_path = (
-            self._configuration.archive_directory
-            / f"{problem.problem_id}.{request_digest}.response.json"
+        response_path = self._archive.child(
+            f"{problem.problem_id}.{request_digest}.response.json"
         )
-        if response_path.exists() and not response_path.is_symlink():
-            response_bytes = response_path.read_bytes()
-        else:
+        response_bytes = self._archive.read_optional(
+            response_path,
+            maximum_bytes=(self._configuration.maximum_http_response_bytes),
+        )
+        if response_bytes is None:
             request = urllib.request.Request(
                 f"{self._configuration.endpoint.rstrip('/')}/api/generate",
                 data=request_bytes,
@@ -143,12 +154,18 @@ class OllamaSolutionProposalEngine:
                     request,
                     timeout=self._configuration.timeout_seconds,
                 ) as response:
-                    response_bytes = response.read()
+                    response_bytes = read_bounded_response(
+                        response,
+                        maximum_bytes=(
+                            self._configuration.maximum_http_response_bytes
+                        ),
+                        label="Ollama proposal response",
+                    )
             except Exception as error:
                 raise ProblemSolvingError(
                     f"Ollama proposal request failed: {error}"
                 ) from error
-            self._write_or_confirm(response_path, response_bytes)
+            self._archive.write_or_confirm(response_path, response_bytes)
 
         try:
             response_payload = json.loads(response_bytes)
@@ -180,9 +197,7 @@ class OllamaSolutionProposalEngine:
             "model_digest": self._configuration.model_digest,
             "ollama_runtime_version": runtime_version,
             "proposal_output_channel": output_channel,
-            "system_prompt_sha256": (
-                self._configuration.system_prompt_sha256
-            ),
+            "system_prompt_sha256": (self._configuration.system_prompt_sha256),
             "request_sha256": request_digest,
             "response_sha256": hashlib.sha256(response_bytes).hexdigest(),
             "draft_sha256": hashlib.sha256(
@@ -198,11 +213,13 @@ class OllamaSolutionProposalEngine:
                 ],
             },
         }
-        receipt_path = (
-            self._configuration.archive_directory
-            / f"{problem.problem_id}.{request_digest}.receipt.json"
+        receipt_path = self._archive.child(
+            f"{problem.problem_id}.{request_digest}.receipt.json"
         )
-        self._write_or_confirm(receipt_path, self._canonical_bytes(receipt))
+        self._archive.write_or_confirm(
+            receipt_path,
+            self._canonical_bytes(receipt),
+        )
         return draft
 
     def _validate_engine_identity(self) -> str:
@@ -214,8 +231,7 @@ class OllamaSolutionProposalEngine:
         ]
         if (
             len(matches) != 1
-            or matches[0].get("digest")
-            != self._configuration.model_digest
+            or matches[0].get("digest") != self._configuration.model_digest
         ):
             raise ProblemSolvingError(
                 "configured Ollama model identity is unavailable"
@@ -244,7 +260,14 @@ class OllamaSolutionProposalEngine:
                 request,
                 timeout=self._configuration.timeout_seconds,
             ) as response:
-                payload = json.load(response)
+                body = read_bounded_response(
+                    response,
+                    maximum_bytes=(
+                        self._configuration.maximum_http_response_bytes
+                    ),
+                    label="Ollama identity response",
+                )
+            payload = json.loads(body)
         except Exception as error:
             raise ProblemSolvingError(
                 f"Ollama identity request failed: {error}"
@@ -282,9 +305,7 @@ class OllamaSolutionProposalEngine:
                 ),
                 "forbid_new_numeric_results": (
                     problem.mode is ProblemMode.ANALYTICAL_COMPUTATIONAL
-                    and self._configured_computation_source(
-                        problem.problem_id
-                    )
+                    and self._configured_computation_source(problem.problem_id)
                     is not None
                 ),
                 "computation_constraints": {
@@ -361,8 +382,7 @@ class OllamaSolutionProposalEngine:
                         self._configuration.computation_runtime_identity
                     ),
                     dependency_lock_identity=(
-                        self._configuration
-                        .computation_dependency_lock_identity
+                        self._configuration.computation_dependency_lock_identity
                     ),
                     seed=self._configuration.seed,
                     timeout_seconds=(
@@ -376,9 +396,7 @@ class OllamaSolutionProposalEngine:
                 )
             return SolutionDraft(
                 problem_id=problem.problem_id,
-                evidence_passage_ids=tuple(
-                    payload["evidence_passage_ids"]
-                ),
+                evidence_passage_ids=tuple(payload["evidence_passage_ids"]),
                 analytical_work=work,
                 computation_plan=plan,
             )
@@ -461,30 +479,6 @@ class OllamaSolutionProposalEngine:
         ).encode("utf-8")
 
     @staticmethod
-    def _write_or_confirm(path: Path, payload: bytes) -> None:
-        if path.is_symlink():
-            raise ProblemSolvingError(
-                f"proposal archive symlink is forbidden: {path.name}"
-            )
-        if path.exists():
-            if path.read_bytes() != payload:
-                raise ProblemSolvingError(
-                    f"proposal archive collision: {path.name}"
-                )
-            return
-        temporary = path.with_name(f".{path.name}.tmp")
-        if temporary.exists() or temporary.is_symlink():
-            raise ProblemSolvingError(
-                f"proposal temporary collision: {temporary.name}"
-            )
-        with temporary.open("xb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, path)
-
-    @staticmethod
     def _output_schema() -> dict[str, Any]:
         string_array = {"type": "array", "items": {"type": "string"}}
         return {
@@ -510,8 +504,6 @@ class OllamaSolutionProposalEngine:
                 "symbolic_result": {"type": ["string", "null"]},
                 "substitutions": string_array,
                 "conclusion": {"type": "string"},
-                "computation_source_code": {
-                    "type": ["string", "null"]
-                },
+                "computation_source_code": {"type": ["string", "null"]},
             },
         }

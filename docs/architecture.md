@@ -71,19 +71,33 @@ purpose-scoped theory retrieval, produces unreviewed analytical candidates, and
 optionally verifies restricted Python computations under an externally supplied
 sandbox. Its Ollama adapters are loopback-only and proposal-only. They write
 bounded request, response, and receipt files to a mode-0700 local archive.
-Archive writes use direct-child containment checks, a stable directory identity,
-no-follow opens, single-link checks, and collision-preserving publication.
-Existing children are accepted only when descriptor and name agree before and
-after the bounded read and their inode, device, size, mode, ownership,
-modification time, and change time remain stable. New children retain an open
-temporary descriptor and verify bounded bytes and digest before publication and
-again after temporary-name removal; the final name must be the same regular,
-single-link inode. These checks reject observed hard-link and in-place mutation
-races. They do not make the files immutable or create an isolation boundary: a
-malicious same-UID process can mutate content or links immediately after the
-final check. The mode-0700 archive must therefore be operated under a trusted,
-isolated UID. The local HTTP transport ignores proxy environment variables and
-rejects redirects. The general proposal adapter
+Archive access is POSIX-only and fails closed unless the platform supports an
+advisory `flock` on the already-open archive directory descriptor. Every
+cooperating reader and writer takes that exclusive lock. Existing children are
+read with a byte bound under the lock and are accepted only when the descriptor
+and name identify the same regular, single-link file and its inode, device,
+size, mode, ownership, modification time, and change time remain stable across
+the read. A writer creates the final child directly, relative to the locked
+directory descriptor, with `O_CREAT | O_EXCL | O_NOFOLLOW`; it writes and
+syncs the open descriptor, then verifies stable descriptor/name identity,
+metadata, link count, exact bytes, and digest before syncing the directory.
+
+This is a cooperative protocol, not atomic publication to observers that ignore
+the lock. The final name is visible as soon as it is created, initially with
+mode 000 as an incomplete-state marker; only a fully verified record advances
+to mode 0600. A write failure or process crash can therefore leave a partial,
+unsynced, mismatched, or explicitly incomplete record. The library may restore
+mode 000 through its retained descriptor after a handled failure, but it never
+unlinks the name. A later retry rejects the marker or content mismatch, and an
+operator must explicitly reconcile the residue. An abrupt crash during the
+small final-mode transition and hostile metadata changes remain outside this
+protocol's guarantees. Advisory locking and post-operation checks do not
+constrain a hostile same-UID or other noncooperating process. Such a process can
+replace, mutate, or link a child during or immediately after an operation. The
+mode-0700 archive must therefore
+be operated under a trusted, isolated UID, and every ordinary archive reader
+and writer must use this protocol. The local HTTP transport ignores proxy
+environment variables and rejects redirects. The general proposal adapter
 defaults to a 131,072-byte HTTP response limit (configurable only from 1 to
 1,048,576 bytes). Verifier stdout plus stderr share the documented
 `maximum_output_bytes` operation bound, 65,536 bytes by default. Verifier

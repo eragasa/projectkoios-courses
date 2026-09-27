@@ -1,11 +1,14 @@
-"""Race-resistant, bounded archive operations for proposal adapters."""
+"""Cooperatively locked, bounded archive operations for proposal adapters."""
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import hmac
 import os
 import stat
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,25 +44,12 @@ class _FileMetadata:
             changed_ns=value.st_ctime_ns,
         )
 
-    def publication_fields(self) -> tuple[int, ...]:
-        """Return fields that link and unlink operations cannot change."""
-        return (
-            self.device,
-            self.inode,
-            self.mode,
-            self.user_id,
-            self.group_id,
-            self.size,
-            self.modified_ns,
-        )
-
 
 class ProposalArchive:
-    """Operate only on direct children of one protected archive directory."""
+    """Operate on direct children under one cooperative directory lock."""
 
     def __init__(self, directory: Path) -> None:
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-        flags |= getattr(os, "O_NOFOLLOW", 0)
+        flags = self._directory_open_flags()
         try:
             initial_stat = os.stat(directory, follow_symlinks=False)
             descriptor = os.open(directory, flags)
@@ -84,6 +74,8 @@ class ProposalArchive:
                 raise ProblemSolvingError(
                     "proposal archive directory must have mode 0700"
                 )
+            self._lock_directory(descriptor)
+            self._unlock_directory(descriptor)
             self._root = root
             self._root_identity = (
                 opened_stat.st_dev,
@@ -117,23 +109,17 @@ class ProposalArchive:
     def read_optional(self, path: Path, *, maximum_bytes: int) -> bytes | None:
         if maximum_bytes < 1:
             raise ProblemSolvingError("archive read bound must be positive")
-        directory_fd = self._open_directory()
-        try:
+        with self._locked_directory() as directory_fd:
             self._validate_child(path)
             return self._read_existing(
                 directory_fd,
                 path.name,
                 maximum_bytes=maximum_bytes,
             )
-        finally:
-            os.close(directory_fd)
 
     def write_or_confirm(self, path: Path, payload: bytes) -> None:
-        directory_fd = self._open_directory()
-        temporary = path.with_name(f".{path.name}.tmp")
-        try:
+        with self._locked_directory() as directory_fd:
             self._validate_child(path)
-            self._validate_child(temporary)
             existing = self._read_existing(
                 directory_fd,
                 path.name,
@@ -145,180 +131,153 @@ class ProposalArchive:
                         f"proposal archive collision: {path.name}"
                     )
                 return
-            if self._entry_exists(directory_fd, temporary.name):
-                raise ProblemSolvingError(
-                    f"proposal temporary collision: {temporary.name}"
-                )
 
-            # Resolve and contain both names again immediately before creation.
+            # The lock serializes cooperating users. O_EXCL preserves a
+            # collision raised by a process that does not honor the lock.
             self._validate_child(path)
-            self._validate_child(temporary)
             flags = (
                 os.O_RDWR
                 | os.O_CREAT
                 | os.O_EXCL
-                | getattr(os, "O_NOFOLLOW", 0)
+                | self._nofollow_flag()
             )
             try:
                 descriptor = os.open(
-                    temporary.name,
+                    path.name,
                     flags,
-                    0o600,
+                    0o000,
                     dir_fd=directory_fd,
                 )
+            except FileExistsError as error:
+                raise ProblemSolvingError(
+                    f"proposal archive collision: {path.name}"
+                ) from error
             except OSError as error:
                 raise ProblemSolvingError(
-                    f"proposal temporary collision: {temporary.name}"
+                    f"proposal archive child cannot be created: {path.name}"
                 ) from error
-            temporary_created = True
-            published = False
-            publication_verified = False
+
+            # Once O_EXCL creates the final name, every failure is fail-stop.
+            # Never unlink that name: a noncooperating same-UID process could
+            # replace it between any identity check and pathname deletion.
             try:
-                os.fchmod(descriptor, 0o600)
-                view = memoryview(payload)
-                written = 0
-                while written < len(view):
-                    count = os.write(descriptor, view[written:])
-                    if count < 1:
-                        raise ProblemSolvingError(
-                            "proposal temporary write made no progress"
-                        )
-                    written += count
-                os.fsync(descriptor)
-
-                # No unchecked name resolution may occur between this payload
-                # verification and collision-preserving publication.
-                self._validate_child(path)
-                self._validate_child(temporary)
-                expected_digest = hashlib.sha256(payload).digest()
-                prepublication = self._verify_named_payload(
-                    directory_fd,
-                    temporary.name,
-                    descriptor,
-                    payload=payload,
-                    expected_digest=expected_digest,
-                )
-                if (
-                    stat.S_IMODE(prepublication.mode) != 0o600
-                    or prepublication.user_id != os.geteuid()
-                ):
-                    raise ProblemSolvingError(
-                        "proposal temporary metadata is unsafe: "
-                        f"{temporary.name}"
-                    )
                 try:
-                    os.link(
-                        temporary.name,
+                    self._write_all(descriptor, payload, name=path.name)
+                    os.fsync(descriptor)
+                    expected_digest = hashlib.sha256(payload).digest()
+                    staged = self._verify_named_payload(
+                        directory_fd,
                         path.name,
-                        src_dir_fd=directory_fd,
-                        dst_dir_fd=directory_fd,
-                        follow_symlinks=False,
+                        descriptor,
+                        payload=payload,
+                        expected_digest=expected_digest,
                     )
-                except FileExistsError as error:
-                    raise ProblemSolvingError(
-                        f"proposal archive collision: {path.name}"
-                    ) from error
-                published = True
-                linked = self._require_regular_links(
-                    os.fstat(descriptor),
-                    name=path.name,
-                    expected_links=2,
-                )
-                temporary_link = self._require_regular_links(
-                    self._stat_named(directory_fd, temporary.name),
-                    name=temporary.name,
-                    expected_links=2,
-                )
-                published_link = self._require_regular_links(
-                    self._stat_named(directory_fd, path.name),
-                    name=path.name,
-                    expected_links=2,
-                )
-                if (
-                    linked != temporary_link
-                    or linked != published_link
-                    or linked.publication_fields()
-                    != prepublication.publication_fields()
-                ):
-                    raise ProblemSolvingError(
-                        "proposal archive publication changed before cleanup: "
-                        f"{path.name}"
-                    )
+                    if (
+                        stat.S_IMODE(staged.mode) != 0o000
+                        or staged.user_id != os.geteuid()
+                    ):
+                        raise ProblemSolvingError(
+                            "proposal archive publication metadata is unsafe: "
+                            f"{path.name}"
+                        )
+                    os.fsync(directory_fd)
 
-                if not self._unlink_if_same_file(
-                    directory_fd,
-                    temporary.name,
-                    descriptor,
-                ):
-                    raise ProblemSolvingError(
-                        "proposal temporary changed during cleanup: "
-                        f"{temporary.name}"
-                    )
-                temporary_created = False
-                post_unlink_descriptor = os.fstat(descriptor)
-                post_unlink_name = self._stat_named(
-                    directory_fd,
-                    path.name,
-                )
-                if (
-                    post_unlink_descriptor.st_nlink != 1
-                    or post_unlink_name.st_nlink != 1
-                ):
-                    raise ProblemSolvingError(
-                        "proposal archive publication has an unsafe "
-                        f"hard link: {path.name}"
-                    )
-                postpublication = self._verify_named_payload(
-                    directory_fd,
-                    path.name,
-                    descriptor,
-                    payload=payload,
-                    expected_digest=expected_digest,
-                )
-                if (
-                    postpublication.publication_fields()
-                    != prepublication.publication_fields()
-                ):
-                    raise ProblemSolvingError(
-                        "proposal archive publication metadata changed: "
-                        f"{path.name}"
-                    )
-                os.fsync(directory_fd)
-                final_descriptor = self._require_regular_links(
-                    os.fstat(descriptor),
-                    name=path.name,
-                    expected_links=1,
-                )
-                final_name = self._require_regular_links(
-                    self._stat_named(directory_fd, path.name),
-                    name=path.name,
-                    expected_links=1,
-                )
-                if (
-                    final_descriptor != postpublication
-                    or final_name != postpublication
-                ):
-                    raise ProblemSolvingError(
-                        "proposal archive publication changed after cleanup: "
-                        f"{path.name}"
-                    )
-                publication_verified = True
-            finally:
-                if published and not publication_verified:
-                    self._unlink_if_same_file(
+                    # Mode 000 is the persistent incomplete-state marker. Set
+                    # the readable mode only after the staged record is synced,
+                    # then verify and sync that completed state as well.
+                    os.fchmod(descriptor, 0o600)
+                    completed = self._verify_named_payload(
                         directory_fd,
                         path.name,
                         descriptor,
+                        payload=payload,
+                        expected_digest=expected_digest,
                     )
-                if temporary_created:
-                    self._unlink_if_same_file(
-                        directory_fd,
-                        temporary.name,
-                        descriptor,
+                    self._require_complete_metadata(
+                        completed,
+                        name=path.name,
                     )
+                    os.fsync(descriptor)
+                    final_descriptor = self._require_regular_single_link(
+                        os.fstat(descriptor),
+                        name=path.name,
+                    )
+                    final_name = self._require_regular_single_link(
+                        self._stat_named(directory_fd, path.name),
+                        name=path.name,
+                    )
+                    if not (
+                        final_descriptor == completed == final_name
+                    ):
+                        raise ProblemSolvingError(
+                            "proposal archive publication changed after "
+                            f"verification: {path.name}"
+                        )
+                except OSError as error:
+                    raise ProblemSolvingError(
+                        "proposal archive publication failed; incomplete "
+                        f"record retained: {path.name}"
+                    ) from error
+            except BaseException:
+                self._mark_incomplete(descriptor)
+                raise
+            finally:
                 os.close(descriptor)
+
+    @contextmanager
+    def _locked_directory(self) -> Iterator[int]:
+        directory_fd = self._open_directory()
+        locked = False
+        try:
+            self._lock_directory(directory_fd)
+            locked = True
+            yield directory_fd
         finally:
-            os.close(directory_fd)
+            try:
+                if locked:
+                    self._unlock_directory(directory_fd)
+            finally:
+                os.close(directory_fd)
+
+    @staticmethod
+    def _lock_directory(directory_fd: int) -> None:
+        try:
+            flock = fcntl.flock
+            operation = fcntl.LOCK_EX
+        except AttributeError as error:
+            raise ProblemSolvingError(
+                "proposal archive POSIX advisory locking is unavailable"
+            ) from error
+        while True:
+            try:
+                flock(directory_fd, operation)
+                return
+            except InterruptedError:
+                continue
+            except OSError as error:
+                raise ProblemSolvingError(
+                    "proposal archive POSIX advisory locking is unavailable"
+                ) from error
+
+    @staticmethod
+    def _unlock_directory(directory_fd: int) -> None:
+        try:
+            flock = fcntl.flock
+            operation = fcntl.LOCK_UN
+        except AttributeError as error:
+            raise ProblemSolvingError(
+                "proposal archive POSIX advisory unlocking is unavailable"
+            ) from error
+        while True:
+            try:
+                flock(directory_fd, operation)
+                return
+            except InterruptedError:
+                continue
+            except OSError as error:
+                raise ProblemSolvingError(
+                    "proposal archive POSIX advisory unlocking is unavailable"
+                ) from error
 
     def _open_directory(self) -> int:
         try:
@@ -337,10 +296,8 @@ class ProposalArchive:
             != self._root_identity
         ):
             raise ProblemSolvingError("proposal archive directory changed")
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-        flags |= getattr(os, "O_NOFOLLOW", 0)
         try:
-            descriptor = os.open(self._root, flags)
+            descriptor = os.open(self._root, self._directory_open_flags())
         except OSError as error:
             raise ProblemSolvingError(
                 "proposal archive directory changed or is unavailable"
@@ -372,14 +329,6 @@ class ProposalArchive:
                 f"proposal archive symlink is forbidden: {path.name}"
             )
 
-    @staticmethod
-    def _entry_exists(directory_fd: int, name: str) -> bool:
-        try:
-            os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            return False
-        return True
-
     def _read_existing(
         self,
         directory_fd: int,
@@ -388,14 +337,14 @@ class ProposalArchive:
         maximum_bytes: int,
     ) -> bytes | None:
         try:
-            named_before = self._require_regular_links(
+            named_before = self._require_regular_single_link(
                 self._stat_named(directory_fd, name),
                 name=name,
-                expected_links=1,
             )
         except FileNotFoundError:
             return None
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        self._require_complete_metadata(named_before, name=name)
+        flags = os.O_RDONLY | self._nofollow_flag()
         try:
             descriptor = os.open(name, flags, dir_fd=directory_fd)
         except OSError as error:
@@ -403,10 +352,9 @@ class ProposalArchive:
                 f"proposal archive child cannot be opened: {name}"
             ) from error
         try:
-            descriptor_before = self._require_regular_links(
+            descriptor_before = self._require_regular_single_link(
                 os.fstat(descriptor),
                 name=name,
-                expected_links=1,
             )
             if descriptor_before != named_before:
                 raise ProblemSolvingError(
@@ -417,16 +365,14 @@ class ProposalArchive:
                 maximum_bytes=maximum_bytes,
                 label=f"proposal archive child {name}",
             )
-            descriptor_after = self._require_regular_links(
+            descriptor_after = self._require_regular_single_link(
                 os.fstat(descriptor),
                 name=name,
-                expected_links=1,
             )
             try:
-                named_after = self._require_regular_links(
+                named_after = self._require_regular_single_link(
                     self._stat_named(directory_fd, name),
                     name=name,
-                    expected_links=1,
                 )
             except FileNotFoundError as error:
                 raise ProblemSolvingError(
@@ -454,16 +400,14 @@ class ProposalArchive:
         payload: bytes,
         expected_digest: bytes,
     ) -> _FileMetadata:
-        descriptor_before = self._require_regular_links(
+        descriptor_before = self._require_regular_single_link(
             os.fstat(descriptor),
             name=name,
-            expected_links=1,
         )
         try:
-            named_before = self._require_regular_links(
+            named_before = self._require_regular_single_link(
                 self._stat_named(directory_fd, name),
                 name=name,
-                expected_links=1,
             )
         except FileNotFoundError as error:
             raise ProblemSolvingError(
@@ -473,22 +417,21 @@ class ProposalArchive:
             raise ProblemSolvingError(
                 f"proposal archive publication changed: {name}"
             )
+
         os.lseek(descriptor, 0, os.SEEK_SET)
         retained = self._read_bounded(
             descriptor,
             maximum_bytes=len(payload),
             label=f"proposal archive publication {name}",
         )
-        descriptor_after = self._require_regular_links(
+        descriptor_after = self._require_regular_single_link(
             os.fstat(descriptor),
             name=name,
-            expected_links=1,
         )
         try:
-            named_after = self._require_regular_links(
+            named_after = self._require_regular_single_link(
                 self._stat_named(directory_fd, name),
                 name=name,
-                expected_links=1,
             )
         except FileNotFoundError as error:
             raise ProblemSolvingError(
@@ -500,6 +443,7 @@ class ProposalArchive:
             raise ProblemSolvingError(
                 f"proposal archive publication changed: {name}"
             )
+
         retained_digest = hashlib.sha256(retained).digest()
         if retained != payload or not hmac.compare_digest(
             retained_digest,
@@ -511,6 +455,43 @@ class ProposalArchive:
         return descriptor_after
 
     @staticmethod
+    def _require_complete_metadata(
+        value: _FileMetadata,
+        *,
+        name: str,
+    ) -> None:
+        if (
+            stat.S_IMODE(value.mode) != 0o600
+            or value.user_id != os.geteuid()
+        ):
+            raise ProblemSolvingError(
+                "proposal archive record is incomplete or unsafe and requires "
+                f"operator reconciliation: {name}"
+            )
+
+    @staticmethod
+    def _mark_incomplete(descriptor: int) -> None:
+        try:
+            os.fchmod(descriptor, 0o000)
+        except OSError:
+            # The descriptor may already refer to an unlinked inode. Never
+            # fall back to a pathname operation that could affect a replacement.
+            pass
+
+    @staticmethod
+    def _write_all(descriptor: int, payload: bytes, *, name: str) -> None:
+        view = memoryview(payload)
+        written = 0
+        while written < len(view):
+            count = os.write(descriptor, view[written:])
+            if count < 1 or count > len(view) - written:
+                raise ProblemSolvingError(
+                    "proposal archive write made invalid progress; incomplete "
+                    f"record retained: {name}"
+                )
+            written += count
+
+    @staticmethod
     def _stat_named(directory_fd: int, name: str) -> os.stat_result:
         return os.stat(
             name,
@@ -519,15 +500,10 @@ class ProposalArchive:
         )
 
     @staticmethod
-    def _same_file(first: os.stat_result, second: os.stat_result) -> bool:
-        return (first.st_dev, first.st_ino) == (second.st_dev, second.st_ino)
-
-    @staticmethod
-    def _require_regular_links(
+    def _require_regular_single_link(
         value: os.stat_result,
         *,
         name: str,
-        expected_links: int,
     ) -> _FileMetadata:
         if not stat.S_ISREG(value.st_mode):
             if stat.S_ISLNK(value.st_mode):
@@ -537,33 +513,35 @@ class ProposalArchive:
             raise ProblemSolvingError(
                 f"proposal archive child is not a regular file: {name}"
             )
-        if value.st_nlink != expected_links:
-            if expected_links == 1:
-                raise ProblemSolvingError(
-                    f"proposal archive hard links are forbidden: {name}"
-                )
+        if value.st_nlink < 1:
             raise ProblemSolvingError(
-                "proposal archive publication acquired an unexpected "
-                f"hard link: {name}"
+                f"proposal archive child changed: {name}"
+            )
+        if value.st_nlink > 1:
+            raise ProblemSolvingError(
+                f"proposal archive hard links are forbidden: {name}"
             )
         return _FileMetadata.capture(value)
 
-    @classmethod
-    def _unlink_if_same_file(
-        cls,
-        directory_fd: int,
-        name: str,
-        descriptor: int,
-    ) -> bool:
+    @staticmethod
+    def _nofollow_flag() -> int:
         try:
-            descriptor_stat = os.fstat(descriptor)
-            named_stat = cls._stat_named(directory_fd, name)
-            if not cls._same_file(descriptor_stat, named_stat):
-                return False
-            os.unlink(name, dir_fd=directory_fd)
-        except OSError:
-            return False
-        return True
+            return os.O_NOFOLLOW
+        except AttributeError as error:
+            raise ProblemSolvingError(
+                "proposal archive no-follow opens are unavailable"
+            ) from error
+
+    @classmethod
+    def _directory_open_flags(cls) -> int:
+        try:
+            directory = os.O_DIRECTORY
+        except AttributeError as error:
+            raise ProblemSolvingError(
+                "proposal archive descriptor-relative operations are "
+                "unavailable"
+            ) from error
+        return os.O_RDONLY | directory | cls._nofollow_flag()
 
     @staticmethod
     def _read_bounded(

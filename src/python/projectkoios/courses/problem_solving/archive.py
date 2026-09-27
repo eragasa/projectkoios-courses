@@ -135,12 +135,7 @@ class ProposalArchive:
             # The lock serializes cooperating users. O_EXCL preserves a
             # collision raised by a process that does not honor the lock.
             self._validate_child(path)
-            flags = (
-                os.O_RDWR
-                | os.O_CREAT
-                | os.O_EXCL
-                | self._nofollow_flag()
-            )
+            flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | self._nofollow_flag()
             try:
                 descriptor = os.open(
                     path.name,
@@ -206,9 +201,7 @@ class ProposalArchive:
                         self._stat_named(directory_fd, path.name),
                         name=path.name,
                     )
-                    if not (
-                        final_descriptor == completed == final_name
-                    ):
+                    if not (final_descriptor == completed == final_name):
                         raise ProblemSolvingError(
                             "proposal archive publication changed after "
                             f"verification: {path.name}"
@@ -460,10 +453,7 @@ class ProposalArchive:
         *,
         name: str,
     ) -> None:
-        if (
-            stat.S_IMODE(value.mode) != 0o600
-            or value.user_id != os.geteuid()
-        ):
+        if stat.S_IMODE(value.mode) != 0o600 or value.user_id != os.geteuid():
             raise ProblemSolvingError(
                 "proposal archive record is incomplete or unsafe and requires "
                 f"operator reconciliation: {name}"
@@ -514,9 +504,7 @@ class ProposalArchive:
                 f"proposal archive child is not a regular file: {name}"
             )
         if value.st_nlink < 1:
-            raise ProblemSolvingError(
-                f"proposal archive child changed: {name}"
-            )
+            raise ProblemSolvingError(f"proposal archive child changed: {name}")
         if value.st_nlink > 1:
             raise ProblemSolvingError(
                 f"proposal archive hard links are forbidden: {name}"

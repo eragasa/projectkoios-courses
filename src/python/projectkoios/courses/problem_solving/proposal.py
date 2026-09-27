@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
 from decimal import Decimal, InvalidOperation
@@ -11,6 +12,7 @@ from typing import Any
 
 from .archive import ProposalArchive
 from .bounded_http import (
+    open_local_request,
     read_bounded_response,
     validate_loopback_endpoint,
 )
@@ -150,7 +152,7 @@ class OllamaSolutionProposalEngine:
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(
+                with open_local_request(
                     request,
                     timeout=self._configuration.timeout_seconds,
                 ) as response:
@@ -161,6 +163,11 @@ class OllamaSolutionProposalEngine:
                         ),
                         label="Ollama proposal response",
                     )
+            except urllib.error.HTTPError as error:
+                error.close()
+                raise ProblemSolvingError(
+                    f"Ollama proposal request failed: {error}"
+                ) from error
             except Exception as error:
                 raise ProblemSolvingError(
                     f"Ollama proposal request failed: {error}"
@@ -256,7 +263,7 @@ class OllamaSolutionProposalEngine:
             headers={"Accept": "application/json"},
         )
         try:
-            with urllib.request.urlopen(
+            with open_local_request(
                 request,
                 timeout=self._configuration.timeout_seconds,
             ) as response:
@@ -268,6 +275,11 @@ class OllamaSolutionProposalEngine:
                     label="Ollama identity response",
                 )
             payload = json.loads(body)
+        except urllib.error.HTTPError as error:
+            error.close()
+            raise ProblemSolvingError(
+                f"Ollama identity request failed: {error}"
+            ) from error
         except Exception as error:
             raise ProblemSolvingError(
                 f"Ollama identity request failed: {error}"

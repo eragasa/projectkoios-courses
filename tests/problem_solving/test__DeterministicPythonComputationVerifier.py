@@ -136,6 +136,67 @@ def test__verify__terminates_at_streaming_output_bound() -> None:
     assert retained_lengths == [64]
 
 
+def test__verify__times_out_after_leader_exits_with_descendant_pipes(
+    tmp_path: Path,
+) -> None:
+    pid_path = tmp_path / "descendant.pid"
+    wrapper = tmp_path / "orphaning_sandbox.py"
+    wrapper.write_text(
+        "import os\n"
+        "import time\n"
+        "child = os.fork()\n"
+        "if child:\n"
+        "    os._exit(0)\n"
+        f"open({str(pid_path)!r}, 'w').write(str(os.getpid()))\n"
+        "time.sleep(30)\n"
+    )
+    timed_plan = replace(plan("print('{}')\n"), timeout_seconds=1)
+
+    started = time.monotonic()
+    result = verifier(
+        sandbox_command_prefix=(sys.executable, str(wrapper)),
+    ).verify(timed_plan)
+    elapsed = time.monotonic() - started
+
+    assert result.outcome is VerificationOutcome.FAILED
+    assert result.findings == ("subprocess timeout",)
+    assert elapsed < 3
+    descendant_id = int(pid_path.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(descendant_id, 0)
+
+
+def test__verify__bounds_output_after_leader_exits_with_descendant_pipes(
+    tmp_path: Path,
+) -> None:
+    pid_path = tmp_path / "descendant.pid"
+    wrapper = tmp_path / "orphaning_writer.py"
+    wrapper.write_text(
+        "import os\n"
+        "import time\n"
+        "child = os.fork()\n"
+        "if child:\n"
+        "    os._exit(0)\n"
+        f"open({str(pid_path)!r}, 'w').write(str(os.getpid()))\n"
+        "os.write(1, b'x' * 10000)\n"
+        "time.sleep(30)\n"
+    )
+
+    started = time.monotonic()
+    result = verifier(
+        maximum_output_bytes=64,
+        sandbox_command_prefix=(sys.executable, str(wrapper)),
+    ).verify(plan("print('{}')\n"))
+    elapsed = time.monotonic() - started
+
+    assert result.outcome is VerificationOutcome.FAILED
+    assert result.findings == ("output byte bound exceeded",)
+    assert elapsed < 2
+    descendant_id = int(pid_path.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(descendant_id, 0)
+
+
 def test__verify__terminates_process_group_on_timeout(
     tmp_path: Path,
 ) -> None:

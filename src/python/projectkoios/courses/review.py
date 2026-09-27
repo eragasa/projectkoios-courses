@@ -10,7 +10,7 @@ from pathlib import PurePosixPath
 
 from .identities import validate_nominal_identity
 
-_COURSE_CODE_RE = re.compile(r"[A-Z0-9-]{2,32}")
+_COURSE_CODE_RE = re.compile(r"[A-Z0-9]+(?:-[A-Z0-9]+)*")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -61,7 +61,10 @@ class CourseRecord:
             raise CourseDomainError(
                 "course identity must use its institution prefix"
             )
-        if _COURSE_CODE_RE.fullmatch(self.code) is None:
+        if (
+            not 2 <= len(self.code) <= 32
+            or _COURSE_CODE_RE.fullmatch(self.code) is None
+        ):
             raise CourseDomainError("course code is invalid")
         _validate_text(
             self.institution_name,
@@ -123,6 +126,12 @@ class CourseMatchEvidence:
     def __post_init__(self) -> None:
         _validate_identity(self.proposal_id, label="proposal identity")
         _validate_identity(self.course_id, label="course identity")
+        if not all(
+            type(field) is CourseMatchField for field in self.matched_fields
+        ):
+            raise CourseDomainError(
+                "course match fields must use CourseMatchField values"
+            )
         expected_order = tuple(
             field for field in CourseMatchField if field in self.matched_fields
         )

@@ -5,6 +5,7 @@ from dataclasses import FrozenInstanceError
 import pytest
 from projectkoios.courses import (
     CourseCandidateReviewStatus,
+    CourseMatchEvidence,
     CourseMatchField,
     CourseMaterial,
     CourseMaterialsStatus,
@@ -143,6 +144,21 @@ def test__project__isolates_ambiguous_code_match() -> None:
     )
 
 
+def test__project__emits_exact_nominal_match_fields() -> None:
+    projection = CourseReviewProjector().project(
+        courses(),
+        materials(),
+        proposals(),
+    )
+
+    assert all(
+        type(field) is CourseMatchField
+        for candidate in projection.candidates
+        for evidence in candidate.match_evidence
+        for field in evidence.matched_fields
+    )
+
+
 def test__project__is_deterministic_across_input_order() -> None:
     projector = CourseReviewProjector()
 
@@ -154,6 +170,48 @@ def test__project__is_deterministic_across_input_order() -> None:
     )
 
     assert reversed_inputs == forward
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["A-1", "BIO-ENG-101", "ENGR219"],
+)
+def test__course_record__accepts_deliberate_single_hyphens(code: str) -> None:
+    record = CourseRecord(
+        course_id="example.course",
+        institution_id="example",
+        institution_name="Example Institute",
+        code=code,
+        title=None,
+    )
+
+    assert record.code == code
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["--", "-A1", "A1-", "A--1", "A---1", "A_1"],
+)
+def test__course_record__rejects_edge_or_repeated_separators(
+    code: str,
+) -> None:
+    with pytest.raises(ValueError, match="course code is invalid"):
+        CourseRecord(
+            course_id="example.course",
+            institution_id="example",
+            institution_name="Example Institute",
+            code=code,
+            title=None,
+        )
+
+
+def test__match_evidence__rejects_string_impersonation_of_enum() -> None:
+    with pytest.raises(ValueError, match="CourseMatchField values"):
+        CourseMatchEvidence(
+            proposal_id="a" * 64,
+            course_id="example.course",
+            matched_fields=("relative_path",),  # type: ignore[arg-type]
+        )
 
 
 def test__review_candidate_is_frozen() -> None:

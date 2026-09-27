@@ -41,6 +41,7 @@ _FORBIDDEN_NAMES = frozenset(
 )
 _OUTPUT_READ_CHUNK_BYTES = 8192
 _PROCESS_TERMINATION_GRACE_SECONDS = 0.2
+_POST_TERMINATION_DRAIN_SECONDS = 0.2
 
 _FORBIDDEN_NODES = (
     ast.AsyncFor,
@@ -137,8 +138,10 @@ class DeterministicPythonComputationVerifier:
                 stderr=subprocess.PIPE,
                 start_new_session=True,
             )
+            process_group_id = process.pid
             capture = self._capture_process_output(
                 process,
+                process_group_id=process_group_id,
                 timeout_seconds=plan.timeout_seconds,
             )
 
@@ -215,10 +218,14 @@ class DeterministicPythonComputationVerifier:
         self,
         process: subprocess.Popen[bytes],
         *,
+        process_group_id: int,
         timeout_seconds: int,
     ) -> _ProcessCapture:
         if process.stdout is None or process.stderr is None:
-            self._terminate_process(process)
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
+            self._terminate_process(process, process_group_id)
             raise ProblemSolvingError(
                 "computation output pipes are unavailable"
             )
@@ -226,35 +233,54 @@ class DeterministicPythonComputationVerifier:
         output = {"stdout": bytearray(), "stderr": bytearray()}
         selector = selectors.DefaultSelector()
         streams = (process.stdout, process.stderr)
-        for name, stream in zip(output, streams, strict=True):
-            os.set_blocking(stream.fileno(), False)
-            selector.register(stream, selectors.EVENT_READ, name)
-
-        deadline = time.monotonic() + timeout_seconds
+        drain_deadline: float | None = None
         timed_out = False
         output_exceeded = False
         stopped = False
+        group_terminated = False
         try:
-            while selector.get_map():
-                if not stopped and time.monotonic() >= deadline:
+            for name, stream in zip(output, streams, strict=True):
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, name)
+            deadline = time.monotonic() + timeout_seconds
+            while selector.get_map() or process.poll() is None:
+                now = time.monotonic()
+                if not stopped and now >= deadline:
                     timed_out = True
                     stopped = True
-                    self._terminate_process(process)
+                    self._terminate_process(process, process_group_id)
+                    group_terminated = True
+                    drain_deadline = (
+                        time.monotonic() + _POST_TERMINATION_DRAIN_SECONDS
+                    )
+                if drain_deadline is not None and now >= drain_deadline:
+                    break
                 wait_seconds = 0.05
-                if not stopped:
+                if drain_deadline is not None:
                     wait_seconds = max(
                         0.0,
-                        min(wait_seconds, deadline - time.monotonic()),
+                        min(wait_seconds, drain_deadline - now),
                     )
+                elif not stopped:
+                    wait_seconds = max(
+                        0.0,
+                        min(wait_seconds, deadline - now),
+                    )
+                if not selector.get_map():
+                    time.sleep(wait_seconds)
+                    continue
                 for key, _ in selector.select(wait_seconds):
                     retained = sum(len(value) for value in output.values())
                     remaining = (
                         self._configuration.maximum_output_bytes - retained
                     )
-                    chunk = os.read(
-                        key.fd,
-                        min(_OUTPUT_READ_CHUNK_BYTES, remaining + 1),
-                    )
+                    try:
+                        chunk = os.read(
+                            key.fd,
+                            min(_OUTPUT_READ_CHUNK_BYTES, remaining + 1),
+                        )
+                    except BlockingIOError:
+                        continue
                     if not chunk:
                         selector.unregister(key.fileobj)
                         continue
@@ -262,16 +288,28 @@ class DeterministicPythonComputationVerifier:
                     target.extend(chunk[:remaining])
                     if len(chunk) > remaining and not output_exceeded:
                         output_exceeded = True
-                        stopped = True
-                        self._terminate_process(process)
-            if process.poll() is None:
-                process.wait()
+                        if not stopped:
+                            stopped = True
+                            self._terminate_process(
+                                process,
+                                process_group_id,
+                            )
+                            group_terminated = True
+                            drain_deadline = (
+                                time.monotonic()
+                                + _POST_TERMINATION_DRAIN_SECONDS
+                            )
         finally:
-            selector.close()
             for stream in streams:
+                try:
+                    selector.unregister(stream)
+                except KeyError:
+                    pass
                 stream.close()
-            if process.poll() is None:
-                self._terminate_process(process)
+            selector.close()
+            if not group_terminated:
+                self._terminate_process(process, process_group_id)
+            process.wait()
 
         return _ProcessCapture(
             returncode=process.returncode,
@@ -282,23 +320,31 @@ class DeterministicPythonComputationVerifier:
         )
 
     @staticmethod
-    def _terminate_process(process: subprocess.Popen[bytes]) -> None:
-        if process.poll() is not None:
-            return
+    def _terminate_process(
+        process: subprocess.Popen[bytes],
+        process_group_id: int,
+    ) -> None:
         try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            process.wait(timeout=_PROCESS_TERMINATION_GRACE_SECONDS)
-            return
-        except subprocess.TimeoutExpired:
-            pass
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
+            group_signalled = True
+            try:
+                os.killpg(process_group_id, signal.SIGTERM)
+            except OSError:
+                group_signalled = False
+            if group_signalled:
+                time.sleep(_PROCESS_TERMINATION_GRACE_SECONDS)
+                try:
+                    os.killpg(process_group_id, signal.SIGKILL)
+                except OSError:
+                    pass
+        finally:
+            if process.poll() is None:
+                try:
+                    process.wait(timeout=_PROCESS_TERMINATION_GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            else:
+                process.wait()
 
     @staticmethod
     def _output_sha256(stdout: bytes, stderr: bytes) -> str:

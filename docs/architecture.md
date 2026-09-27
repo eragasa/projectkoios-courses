@@ -72,9 +72,15 @@ optionally verifies restricted Python computations under an externally supplied
 sandbox. Its Ollama adapters are loopback-only and proposal-only. They write
 bounded request, response, and receipt files to a mode-0700 local archive.
 Archive writes use direct-child containment checks, a stable directory identity,
-no-follow opens, and collision-preserving publication. The general proposal
-adapter defaults to a 131,072-byte HTTP response limit (configurable only from 1
-to 1,048,576 bytes). Verifier stdout plus stderr share the documented
+no-follow opens, single-link checks, and collision-preserving publication.
+Published children must have exactly one link after the temporary name is
+removed. These checks reject pre-existing or observed outside hard links, but
+they are not an isolation boundary against a malicious same-UID process that
+can continuously mutate the archive namespace; the mode-0700 archive must be
+operated under a trusted, isolated UID. The local HTTP transport ignores proxy
+environment variables and rejects redirects. The general proposal adapter
+defaults to a 131,072-byte HTTP response limit (configurable only from 1 to
+1,048,576 bytes). Verifier stdout plus stderr share the documented
 `maximum_output_bytes` operation bound, 65,536 bytes by default. Verifier
 timeout or output overrun terminates the isolated process group. These are
 deliberate local side effects; no adapter grants review or publication

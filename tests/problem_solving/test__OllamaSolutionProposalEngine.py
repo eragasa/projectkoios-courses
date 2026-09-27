@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import urllib.error
+import urllib.request
 from dataclasses import replace
+from email.message import Message
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,6 +26,23 @@ from projectkoios.courses.problem_solving import (
 
 PROMPT = "Propose a source-grounded solution."
 MODEL_DIGEST = "a" * 64
+
+
+@pytest.fixture(autouse=True)
+def route_test_http_through_urlopen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def open_request(
+        request: urllib.request.Request,
+        *,
+        timeout: int,
+    ) -> object:
+        return urllib.request.urlopen(request, timeout=timeout)
+
+    monkeypatch.setattr(
+        "projectkoios.courses.problem_solving.proposal.open_local_request",
+        open_request,
+    )
 
 
 class JsonResponse(io.BytesIO):
@@ -123,6 +143,7 @@ def test__propose__archives_request_response_and_receipt(
     with patch("urllib.request.urlopen", side_effect=responses):
         draft = engine.propose(problem(), evidence())
 
+    assert all(item.closed for item in responses)
     assert draft.problem_id == "book.20.Q.1"
     assert draft.evidence_passage_ids == ("evidence:1",)
     assert draft.computation_plan is None
@@ -362,6 +383,35 @@ def test__propose__rejects_streamed_http_body_over_bound(
 
     assert not tuple(archive.glob("*.response.json"))
     assert not tuple(archive.glob("*.receipt.json"))
+
+
+def test__propose__closes_http_error_response(tmp_path: Path) -> None:
+    archive = tmp_path / "archive"
+    archive.mkdir(mode=0o700)
+    http_error = urllib.error.HTTPError(
+        url="http://127.0.0.1:11434/api/generate",
+        code=500,
+        msg="Internal Server Error",
+        hdrs=Message(),
+        fp=io.BytesIO(b"failure"),
+    )
+    responses = (
+        response(
+            {"models": [{"name": "test-model:1", "digest": MODEL_DIGEST}]}
+        ),
+        response({"version": "0.34.2"}),
+        http_error,
+    )
+
+    with (
+        patch("urllib.request.urlopen", side_effect=responses),
+        pytest.raises(ProblemSolvingError, match="HTTP Error 500"),
+    ):
+        OllamaSolutionProposalEngine(configuration(archive)).propose(
+            problem(), evidence()
+        )
+
+    assert http_error.closed
 
 
 def test__propose__fails_closed_on_malformed_http_response(

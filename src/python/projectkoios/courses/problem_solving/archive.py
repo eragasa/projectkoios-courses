@@ -90,6 +90,7 @@ class ProposalArchive:
                 raise ProblemSolvingError(
                     f"proposal archive child is not a regular file: {path.name}"
                 )
+            self._require_single_link(child_stat, name=path.name)
             flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
             try:
                 descriptor = os.open(path.name, flags, dir_fd=directory_fd)
@@ -99,14 +100,12 @@ class ProposalArchive:
                 ) from error
             try:
                 opened_stat = os.fstat(descriptor)
-                if (
-                    opened_stat.st_dev != child_stat.st_dev
-                    or opened_stat.st_ino != child_stat.st_ino
-                ):
+                if not self._same_file(opened_stat, child_stat):
                     raise ProblemSolvingError(
                         "proposal archive child changed during read: "
                         f"{path.name}"
                     )
+                self._require_single_link(opened_stat, name=path.name)
                 return self._read_bounded(
                     descriptor,
                     maximum_bytes=maximum_bytes,
@@ -161,6 +160,7 @@ class ProposalArchive:
                     f"proposal temporary collision: {temporary.name}"
                 ) from error
             temporary_created = True
+            published = False
             try:
                 os.fchmod(descriptor, 0o600)
                 view = memoryview(payload)
@@ -168,27 +168,88 @@ class ProposalArchive:
                 while written < len(view):
                     written += os.write(descriptor, view[written:])
                 os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+                temporary_stat = os.fstat(descriptor)
+                self._require_single_link(
+                    temporary_stat,
+                    name=temporary.name,
+                )
 
-            # link(2) publishes without replacing a child created by a race.
-            self._validate_child(path)
-            self._validate_child(temporary)
-            try:
-                os.link(
+                # link(2) publishes without replacing a child created by a
+                # race. Keep the descriptor open through final link checks.
+                self._validate_child(path)
+                self._validate_child(temporary)
+                named_temporary_stat = os.stat(
                     temporary.name,
-                    path.name,
-                    src_dir_fd=directory_fd,
-                    dst_dir_fd=directory_fd,
+                    dir_fd=directory_fd,
                     follow_symlinks=False,
                 )
-            except FileExistsError as error:
-                raise ProblemSolvingError(
-                    f"proposal archive collision: {path.name}"
-                ) from error
-            os.unlink(temporary.name, dir_fd=directory_fd)
-            temporary_created = False
-            os.fsync(directory_fd)
+                if not self._same_file(
+                    named_temporary_stat,
+                    temporary_stat,
+                ):
+                    raise ProblemSolvingError(
+                        "proposal temporary changed during publication: "
+                        f"{temporary.name}"
+                    )
+                self._require_single_link(
+                    named_temporary_stat,
+                    name=temporary.name,
+                )
+                try:
+                    os.link(
+                        temporary.name,
+                        path.name,
+                        src_dir_fd=directory_fd,
+                        dst_dir_fd=directory_fd,
+                        follow_symlinks=False,
+                    )
+                except FileExistsError as error:
+                    raise ProblemSolvingError(
+                        f"proposal archive collision: {path.name}"
+                    ) from error
+                published = True
+                linked_stat = os.fstat(descriptor)
+                if linked_stat.st_nlink != 2:
+                    raise ProblemSolvingError(
+                        "proposal archive publication acquired an "
+                        f"unexpected hard link: {path.name}"
+                    )
+                os.unlink(temporary.name, dir_fd=directory_fd)
+                temporary_created = False
+                final_stat = os.fstat(descriptor)
+                published_stat = os.stat(
+                    path.name,
+                    dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+                if (
+                    final_stat.st_nlink != 1
+                    or published_stat.st_nlink != 1
+                    or not self._same_file(final_stat, published_stat)
+                ):
+                    raise ProblemSolvingError(
+                        "proposal archive publication has an unsafe "
+                        f"hard link: {path.name}"
+                    )
+                os.fsync(directory_fd)
+            finally:
+                if published:
+                    current_stat = os.fstat(descriptor)
+                    if current_stat.st_nlink != 1:
+                        try:
+                            published_stat = os.stat(
+                                path.name,
+                                dir_fd=directory_fd,
+                                follow_symlinks=False,
+                            )
+                            if self._same_file(
+                                current_stat,
+                                published_stat,
+                            ):
+                                os.unlink(path.name, dir_fd=directory_fd)
+                        except FileNotFoundError:
+                            pass
+                os.close(descriptor)
         finally:
             if temporary_created:
                 try:
@@ -280,17 +341,16 @@ class ProposalArchive:
             raise ProblemSolvingError(
                 f"proposal archive child is not a regular file: {name}"
             )
+        self._require_single_link(child_stat, name=name)
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(name, flags, dir_fd=directory_fd)
         try:
             opened_stat = os.fstat(descriptor)
-            if (
-                opened_stat.st_dev != child_stat.st_dev
-                or opened_stat.st_ino != child_stat.st_ino
-            ):
+            if not self._same_file(opened_stat, child_stat):
                 raise ProblemSolvingError(
                     f"proposal archive child changed during read: {name}"
                 )
+            self._require_single_link(opened_stat, name=name)
             return self._read_bounded(
                 descriptor,
                 maximum_bytes=maximum_bytes,
@@ -298,6 +358,17 @@ class ProposalArchive:
             )
         finally:
             os.close(descriptor)
+
+    @staticmethod
+    def _same_file(first: os.stat_result, second: os.stat_result) -> bool:
+        return (first.st_dev, first.st_ino) == (second.st_dev, second.st_ino)
+
+    @staticmethod
+    def _require_single_link(value: os.stat_result, *, name: str) -> None:
+        if value.st_nlink != 1:
+            raise ProblemSolvingError(
+                f"proposal archive hard links are forbidden: {name}"
+            )
 
     @staticmethod
     def _read_bounded(

@@ -10,6 +10,7 @@ authors = [
 ]
 
 [project.scripts]
+koios-course-inventory = "projectkoios.courses.authoring_inventory_cli:main"
 koios-course-sanitize = "projectkoios.courses.cli:main"
 koios-course-propose-conversion-intent = "projectkoios.courses.problem_solving.conversion_intent_cli:main"
 

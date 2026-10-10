@@ -29,5 +29,19 @@ koios-course-sanitize SOURCE DESTINATION \
 See `docs/sanitization.md` for the privacy, ownership, audit, and manual-review
 requirements.
 
+## Read-only course inventory
+
+Inspect an explicit private course root without storing its absolute path or
+writing to it:
+
+```bash
+koios-course-inventory \
+  manifests/dlsu.phy627m.gs1.authoring.json \
+  --course-root /explicit/private/course/root
+```
+
+See `docs/course-authoring-inventory.md` for the manifest, provenance, and
+reference-authority boundaries.
+
 Repository routing is documented in
 `projectkoios-bootstrap/maps/repositories.md`.

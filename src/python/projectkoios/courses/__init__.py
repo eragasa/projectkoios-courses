@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+from .authoring_inventory import (
+    CourseAuthoringInventoryError,
+    CourseAuthoringManifest,
+    CourseSourceInventory,
+    CourseSourceInventoryProjector,
+    ExternalReferenceBinding,
+)
 from .review import (
     CourseCandidateReviewStatus,
     CourseDomainError,
@@ -19,6 +26,8 @@ from .review import (
 )
 
 __all__ = [
+    "CourseAuthoringInventoryError",
+    "CourseAuthoringManifest",
     "CourseCandidateReviewStatus",
     "CourseDomainError",
     "CourseMatchAmbiguity",
@@ -32,4 +41,7 @@ __all__ = [
     "CourseReviewCandidate",
     "CourseReviewProjection",
     "CourseReviewProjector",
+    "CourseSourceInventory",
+    "CourseSourceInventoryProjector",
+    "ExternalReferenceBinding",
 ]

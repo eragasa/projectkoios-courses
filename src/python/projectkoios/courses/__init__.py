@@ -10,6 +10,17 @@ from .authoring_inventory import (
     ExternalBibliographyRoot,
     ExternalReferenceBinding,
 )
+from .reference_resolution import (
+    CourseReferenceDisplayCitekeyStatus,
+    CourseReferenceLocatorBinding,
+    CourseReferenceResolutionError,
+    CourseReferenceResolutionProjector,
+    CourseReferenceResolutionScope,
+    CourseReferenceResolutionWindow,
+    CourseReferenceRole,
+    CourseReferenceSelection,
+    CourseReferenceSelectionOrigin,
+)
 from .review import (
     CourseCandidateReviewStatus,
     CourseDomainError,
@@ -37,6 +48,15 @@ __all__ = [
     "CourseMaterial",
     "CourseMaterialsStatus",
     "CourseProposalProjection",
+    "CourseReferenceDisplayCitekeyStatus",
+    "CourseReferenceLocatorBinding",
+    "CourseReferenceResolutionError",
+    "CourseReferenceResolutionProjector",
+    "CourseReferenceResolutionScope",
+    "CourseReferenceResolutionWindow",
+    "CourseReferenceRole",
+    "CourseReferenceSelection",
+    "CourseReferenceSelectionOrigin",
     "CourseRecord",
     "CourseReviewAuthority",
     "CourseReviewCandidate",

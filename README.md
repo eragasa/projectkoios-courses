@@ -42,7 +42,9 @@ koios-course-inventory \
 ```
 
 See `docs/course-authoring-inventory.md` for the manifest, provenance, and
-reference-authority boundaries.
+reference-authority boundaries. The immutable course-scoped queue seed and its
+pure navigation rules are documented in
+`docs/course-reference-resolution-scope.md`.
 
 Repository routing is documented in
 `projectkoios-bootstrap/maps/repositories.md`.

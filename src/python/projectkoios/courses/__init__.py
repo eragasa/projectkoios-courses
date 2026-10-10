@@ -7,6 +7,7 @@ from .authoring_inventory import (
     CourseAuthoringManifest,
     CourseSourceInventory,
     CourseSourceInventoryProjector,
+    ExternalBibliographyRoot,
     ExternalReferenceBinding,
 )
 from .review import (
@@ -43,5 +44,6 @@ __all__ = [
     "CourseReviewProjector",
     "CourseSourceInventory",
     "CourseSourceInventoryProjector",
+    "ExternalBibliographyRoot",
     "ExternalReferenceBinding",
 ]

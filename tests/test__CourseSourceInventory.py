@@ -9,6 +9,7 @@ from projectkoios.courses import (
     CourseAuthoringInventoryError,
     CourseAuthoringManifest,
     CourseSourceInventoryProjector,
+    ExternalBibliographyRoot,
 )
 
 
@@ -72,7 +73,8 @@ A supported claim \\cite[see][p.~2]{Existing2026,candidate2026}.
         encoding="utf-8",
     )
     (root / "references.bib").write_text(
-        "@book{Existing2026, title={Existing source}}\n",
+        "@book{Existing2026, title={Existing source}}\n"
+        "@book{candidate2026, title={Candidate source}}\n",
         encoding="utf-8",
     )
     (root / "notebooks" / "chapter.ipynb").write_text(
@@ -175,6 +177,169 @@ def test__solid_state_manifest__declares_one_explicit_fourteen_work_scope() -> (
     ]
 
 
+def test__project__admits_declared_external_bibliography_deterministically(
+    tmp_path: Path,
+) -> None:
+    manifest = CourseAuthoringManifest.from_json(_write_manifest(tmp_path))
+    root = _write_course(tmp_path)
+    external = tmp_path / "references"
+    external.mkdir()
+    bibliography = external / "references.bib"
+    bibliography.write_text(
+        "@book{Existing2026, title={Existing source}}\n"
+        "@book{candidate2026, title={Candidate source}}\n",
+        encoding="utf-8",
+    )
+    local = root / "references.bib"
+    local.unlink()
+    main = root / "main.tex"
+    main.write_text(
+        main.read_text(encoding="utf-8").replace(
+            "\\bibliography{references}",
+            "\\bibliography{../references/references}",
+        ),
+        encoding="utf-8",
+    )
+    registrations = (
+        ExternalBibliographyRoot(
+            alias="references-handoff",
+            path=external,
+        ),
+    )
+    projector = CourseSourceInventoryProjector()
+
+    first = projector.project(
+        manifest=manifest,
+        course_root=root,
+        external_bibliography_roots=registrations,
+    )
+    second = projector.project(
+        manifest=manifest,
+        course_root=root,
+        external_bibliography_roots=registrations,
+    )
+    encoded = first.to_json()
+
+    assert first == second
+    assert first.inventory_id == second.inventory_id
+    assert str(tmp_path) not in encoded
+    assert ".." not in first.bibliography_files[0].path
+    assert first.bibliography_files[0].as_dict() == {
+        "byte_size": bibliography.stat().st_size,
+        "citekeys": ["Existing2026", "candidate2026"],
+        "path": "references.bib",
+        "root_alias": "references-handoff",
+        "sha256": hashlib.sha256(bibliography.read_bytes()).hexdigest(),
+    }
+    assert first.reference_scope_status == "complete"
+
+
+def test__project__rejects_undeclared_bibliography_traversal(
+    tmp_path: Path,
+) -> None:
+    manifest = CourseAuthoringManifest.from_json(_write_manifest(tmp_path))
+    root = _write_course(tmp_path)
+    main = root / "main.tex"
+    main.write_text(
+        main.read_text(encoding="utf-8").replace(
+            "\\bibliography{references}",
+            "\\bibliography{../references/references}",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        CourseAuthoringInventoryError,
+        match="escapes every registered root",
+    ):
+        CourseSourceInventoryProjector().project(
+            manifest=manifest,
+            course_root=root,
+        )
+
+
+def test__project__rejects_external_root_alias_collision(
+    tmp_path: Path,
+) -> None:
+    manifest = CourseAuthoringManifest.from_json(_write_manifest(tmp_path))
+    root = _write_course(tmp_path)
+    external = tmp_path / "references"
+    external.mkdir()
+
+    with pytest.raises(
+        CourseAuthoringInventoryError,
+        match="alias collides with the course root",
+    ):
+        CourseSourceInventoryProjector().project(
+            manifest=manifest,
+            course_root=root,
+            external_bibliography_roots=(
+                ExternalBibliographyRoot(
+                    alias=manifest.root_alias,
+                    path=external,
+                ),
+            ),
+        )
+
+
+def test__project__rejects_bibliography_outside_registered_root(
+    tmp_path: Path,
+) -> None:
+    manifest = CourseAuthoringManifest.from_json(_write_manifest(tmp_path))
+    root = _write_course(tmp_path)
+    external = tmp_path / "references"
+    external.mkdir()
+    outside = tmp_path / "other"
+    outside.mkdir()
+    (outside / "references.bib").write_text(
+        "@book{Other2026, title={Other}}\n",
+        encoding="utf-8",
+    )
+    main = root / "main.tex"
+    main.write_text(
+        main.read_text(encoding="utf-8").replace(
+            "\\bibliography{references}",
+            "\\bibliography{../other/references}",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        CourseAuthoringInventoryError,
+        match="escapes every registered root",
+    ):
+        CourseSourceInventoryProjector().project(
+            manifest=manifest,
+            course_root=root,
+            external_bibliography_roots=(
+                ExternalBibliographyRoot(
+                    alias="references-handoff",
+                    path=external,
+                ),
+            ),
+        )
+
+
+def test__project__rejects_overlapping_roots(tmp_path: Path) -> None:
+    manifest = CourseAuthoringManifest.from_json(_write_manifest(tmp_path))
+    root = _write_course(tmp_path)
+
+    with pytest.raises(
+        CourseAuthoringInventoryError,
+        match="source roots must not overlap",
+    ):
+        CourseSourceInventoryProjector().project(
+            manifest=manifest,
+            course_root=root,
+            external_bibliography_roots=(
+                ExternalBibliographyRoot(
+                    alias="ambiguous-parent",
+                    path=tmp_path,
+                ),
+            ),
+        )
+
+
 def test__manifest__retains_exact_bytes_and_normalized_identity(
     tmp_path: Path,
 ) -> None:
@@ -215,12 +380,9 @@ def test__project__reports_reference_scope_gaps(tmp_path: Path) -> None:
     )
 
     assert inventory.reference_scope_status == "incomplete"
-    assert inventory.missing_preserved_citekeys == ("Existing2026",)
+    assert inventory.missing_preserved_citekeys == ()
     assert inventory.unplanned_inline_citekeys == ("Other2026",)
-    assert inventory.unresolved_citation_citekeys == (
-        "Existing2026",
-        "unknown2026",
-    )
+    assert inventory.unresolved_citation_citekeys == ("unknown2026",)
 
 
 @pytest.mark.parametrize(

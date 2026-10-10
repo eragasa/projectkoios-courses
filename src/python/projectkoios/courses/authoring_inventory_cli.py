@@ -10,6 +10,7 @@ from .authoring_inventory import (
     CourseAuthoringInventoryError,
     CourseAuthoringManifest,
     CourseSourceInventoryProjector,
+    ExternalBibliographyRoot,
 )
 
 
@@ -29,7 +30,49 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="explicit private source root; never retained in output",
     )
+    parser.add_argument(
+        "--bibliography-root",
+        action="append",
+        default=[],
+        metavar="ALIAS=PATH",
+        help=(
+            "named private root for an external bibliography; repeatable and "
+            "never retained as an absolute path"
+        ),
+    )
     return parser
+
+
+def _bibliography_roots(
+    values: list[str],
+) -> tuple[ExternalBibliographyRoot, ...]:
+    """Parse explicit named bibliography roots.
+
+    Parameters
+    ----------
+    values
+        Repeated ``ALIAS=PATH`` command-line values.
+
+    Returns
+    -------
+    tuple[ExternalBibliographyRoot, ...]
+        Immutable registrations in command-line order.
+
+    Raises
+    ------
+    CourseAuthoringInventoryError
+        If a value omits a nonempty alias or path.
+    """
+
+    roots: list[ExternalBibliographyRoot] = []
+    for value in values:
+        alias, separator, raw_path = value.partition("=")
+        if not separator or not alias or not raw_path:
+            raise CourseAuthoringInventoryError(
+                "bibliography roots must use ALIAS=PATH"
+            )
+        roots.append(ExternalBibliographyRoot(alias=alias, path=Path(raw_path)))
+    return tuple(roots)
 
 
 def main() -> int:
@@ -41,6 +84,9 @@ def main() -> int:
         inventory = CourseSourceInventoryProjector().project(
             manifest=manifest,
             course_root=arguments.course_root,
+            external_bibliography_roots=_bibliography_roots(
+                arguments.bibliography_root
+            ),
         )
     except CourseAuthoringInventoryError as error:
         print(f"error: {error}", file=sys.stderr)

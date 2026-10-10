@@ -37,7 +37,8 @@ writing to it:
 ```bash
 koios-course-inventory \
   manifests/dlsu.phy627m.gs1.authoring.json \
-  --course-root /explicit/private/course/root
+  --course-root /explicit/private/course/root \
+  --bibliography-root references-handoff=/explicit/private/references/root
 ```
 
 See `docs/course-authoring-inventory.md` for the manifest, provenance, and

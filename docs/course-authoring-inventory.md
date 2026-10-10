@@ -16,13 +16,22 @@ reference identity, or publish anything.
 ```bash
 koios-course-inventory \
   manifests/dlsu.phy627m.gs1.authoring.json \
-  --course-root /explicit/private/course/root
+  --course-root /explicit/private/course/root \
+  --bibliography-root references-handoff=/explicit/private/references/root
 ```
 
 The command writes the inventory JSON to standard output and performs no source
 writes. A caller may redirect output to an operator-selected location. The
-projection contains only the manifest's root alias and source-root-relative
-POSIX paths.
+projection contains only root aliases and root-relative POSIX paths.
+
+`--bibliography-root ALIAS=PATH` is repeatable and registers a runtime-only
+private root. A LaTeX bibliography path that leaves the manuscript root is
+accepted only when its lexically resolved target is confined beneath exactly
+one registered root. Durable bibliography records contain that alias and a
+bounded path beneath it; they never contain `..` or an absolute path. Duplicate
+aliases, aliases colliding with the course root, overlapping roots, symlinks,
+and undeclared escapes fail closed. Local bibliography paths retain their
+original behavior and require no external-root option.
 
 ## Manifest boundary
 
@@ -56,19 +65,22 @@ for every visited TeX source. It also records:
 - literal include edges;
 - parts, chapters, sections, and subsections;
 - citation occurrences and inline `\\bibitem` keys;
-- declared bibliography files, when present;
+- declared bibliography files, their exact byte identities, and observed
+  BibTeX citekeys in entry order;
 - notebook byte identities; and
 - mechanical gaps between the observed inline/cited keys and the manifest's
   planned reference scope.
 
 The inventory and manifest identities are deterministic SHA-256 content
-identities. `reference_scope.status=complete` means only that the expected
-inline keys are present, no unplanned inline keys were observed, and every
-cited key is in the observed inline or externally bound set. It is not a
-reference, scientific, pedagogical, rights, or publication decision.
+identities. When a bibliography file is declared, the inventory verifies that
+its combined inline and BibTeX keys contain the complete planned scope and
+reports missing, extra, or duplicate bibliography keys. Otherwise the original
+inline-plus-external-binding planning behavior remains in effect.
+`reference_scope.status=complete` is only this mechanical scope check: it is not
+a reference, scientific, pedagogical, rights, or publication decision.
 
-The initial scanner deliberately supports only literal root-relative LaTeX
-paths and the command forms needed by the current manuscript. Dynamic TeX
-macros and a general TeX build graph are outside this slice and fail through
-missing-file or incomplete-inventory evidence rather than a compatibility
-layer.
+The initial scanner deliberately supports only literal LaTeX paths confined to
+the course root or an explicitly registered bibliography root, plus the command
+forms needed by the current manuscript. Dynamic TeX macros and a general TeX
+build graph are outside this slice and fail through missing-file or
+incomplete-inventory evidence rather than a compatibility layer.

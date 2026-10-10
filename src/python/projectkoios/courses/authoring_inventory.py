@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import stat
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar
@@ -17,6 +19,10 @@ _INVENTORY_SCHEMA_ID = "projectkoios.courses.course-source-inventory"
 _SCHEMA_VERSION = 1
 _SHA256_REVISION = re.compile(r"sha256:[0-9a-f]{64}")
 _CITEKEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+-]{0,199}")
+_BIBTEX_ENTRY = re.compile(
+    r"(?im)^[ \t]*@(?!comment\b|string\b|preamble\b)"
+    r"[A-Za-z]+\s*[{(]\s*([^,\s{}()]+)\s*,"
+)
 _COMMAND = re.compile(
     r"\\(?P<name>"
     r"addbibresource|bibliography|bibitem|include|input|"
@@ -262,19 +268,60 @@ class CourseAuthoringManifest:
 
 
 @dataclass(frozen=True, slots=True)
+class ExternalBibliographyRoot:
+    """Register one runtime-only root for external bibliography files.
+
+    Parameters
+    ----------
+    alias
+        Stable nominal alias retained in durable inventory output.
+    path
+        Explicit private runtime path. The path itself is never serialized.
+
+    Raises
+    ------
+    CourseAuthoringInventoryError
+        If the alias is invalid or ``path`` is not an exact ``Path``.
+    """
+
+    alias: str
+    path: Path = field(repr=False)
+
+    def __post_init__(self) -> None:
+        try:
+            validate_nominal_identity(
+                self.alias,
+                label="external bibliography root alias",
+            )
+        except ValueError as error:
+            raise CourseAuthoringInventoryError(str(error)) from error
+        if not isinstance(self.path, Path):
+            raise CourseAuthoringInventoryError(
+                "external bibliography root path must be a Path"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class SourceFileInventory:
     """Record one root-relative source file and its exact byte identity."""
 
     path: str
     byte_size: int
     sha256: str
+    root_alias: str | None = None
+    citekeys: tuple[str, ...] | None = None
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "byte_size": self.byte_size,
             "path": self.path,
             "sha256": self.sha256,
         }
+        if self.root_alias is not None:
+            value["root_alias"] = self.root_alias
+        if self.citekeys is not None:
+            value["citekeys"] = list(self.citekeys)
+        return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,6 +409,9 @@ class CourseSourceInventory:
     missing_preserved_citekeys: tuple[str, ...]
     unplanned_inline_citekeys: tuple[str, ...]
     unresolved_citation_citekeys: tuple[str, ...]
+    missing_planned_citekeys: tuple[str, ...]
+    unplanned_bibliography_citekeys: tuple[str, ...]
+    duplicate_bibliography_citekeys: tuple[str, ...]
     inventory_id: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -380,6 +430,9 @@ class CourseSourceInventory:
             self.missing_preserved_citekeys
             or self.unplanned_inline_citekeys
             or self.unresolved_citation_citekeys
+            or self.missing_planned_citekeys
+            or self.unplanned_bibliography_citekeys
+            or self.duplicate_bibliography_citekeys
         ):
             return "incomplete"
         return "complete"
@@ -392,6 +445,13 @@ class CourseSourceInventory:
         )
         inline_citekeys = tuple(
             dict.fromkeys(item.citekey for item in self.inline_bibliography)
+        )
+        bibliography_citekeys = tuple(
+            dict.fromkeys(
+                citekey
+                for item in self.bibliography_files
+                for citekey in (item.citekeys or ())
+            )
         )
         payload: dict[str, object] = {
             "course": {
@@ -406,6 +466,7 @@ class CourseSourceInventory:
                 "schema_version": self.manifest.schema_version,
             },
             "manuscript": {
+                "bibliography_citekeys": list(bibliography_citekeys),
                 "bibliography_files": [
                     item.as_dict() for item in self.bibliography_files
                 ],
@@ -426,6 +487,10 @@ class CourseSourceInventory:
                     binding.as_dict()
                     for binding in self.manifest.external_reference_bindings
                 ],
+                "duplicate_bibliography_citekeys": list(
+                    self.duplicate_bibliography_citekeys
+                ),
+                "missing_planned_citekeys": list(self.missing_planned_citekeys),
                 "missing_preserved_citekeys": list(
                     self.missing_preserved_citekeys
                 ),
@@ -433,6 +498,9 @@ class CourseSourceInventory:
                 "planned_citekeys": list(self.manifest.planned_citekeys),
                 "preserved_citekeys": list(self.manifest.preserved_citekeys),
                 "status": self.reference_scope_status,
+                "unplanned_bibliography_citekeys": list(
+                    self.unplanned_bibliography_citekeys
+                ),
                 "unplanned_inline_citekeys": list(
                     self.unplanned_inline_citekeys
                 ),
@@ -461,19 +529,64 @@ class CourseSourceInventory:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _AuthorizedExternalBibliographyRoot:
+    alias: str
+    path: Path = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class _BibliographyTarget:
+    root: Path = field(repr=False)
+    relative_path: str
+    root_alias: str | None
+
+
 class CourseSourceInventoryProjector:
-    """Read an explicit private root and return a side-effect-free inventory."""
+    """Read explicit private roots and return a side-effect-free inventory."""
 
     def project(
         self,
         *,
         manifest: CourseAuthoringManifest,
         course_root: Path,
+        external_bibliography_roots: tuple[ExternalBibliographyRoot, ...] = (),
     ) -> CourseSourceInventory:
-        """Inventory the exact source tree named by ``manifest``."""
+        """Inventory the exact source tree named by ``manifest``.
+
+        Parameters
+        ----------
+        manifest
+            Validated course authoring manifest.
+        course_root
+            Explicit private manuscript root.
+        external_bibliography_roots
+            Immutable runtime registrations for bibliography roots outside the
+            manuscript root. Absolute paths are used only during the read and
+            never retained in inventory output.
+
+        Returns
+        -------
+        CourseSourceInventory
+            Deterministic inventory containing aliases and relative paths.
+
+        Raises
+        ------
+        CourseAuthoringInventoryError
+            If a root is invalid, aliases collide, roots overlap, or a source
+            path escapes every registered root.
+        """
 
         root = _authorize_course_root(course_root)
-        state = _InventoryState(root=root)
+        external_roots = _authorize_external_bibliography_roots(
+            values=external_bibliography_roots,
+            course_root=root,
+            course_root_alias=manifest.root_alias,
+        )
+        state = _InventoryState(
+            root=root,
+            external_bibliography_roots=external_roots,
+        )
         self._visit_tex(
             relative_path=manifest.main_tex,
             state=state,
@@ -487,10 +600,20 @@ class CourseSourceInventoryProjector:
         inline_citekeys = tuple(
             dict.fromkeys(item.citekey for item in state.inline_bibliography)
         )
+        bibliography_citekey_occurrences = tuple(
+            citekey
+            for item in bibliography_files
+            for citekey in (item.citekeys or ())
+        )
+        bibliography_citekeys = tuple(
+            dict.fromkeys(bibliography_citekey_occurrences)
+        )
+        bibliography_citekey_counts = Counter(bibliography_citekey_occurrences)
+        observed_citekeys = set(inline_citekeys) | set(bibliography_citekeys)
         cited_citekeys = tuple(
             dict.fromkeys(item.citekey for item in state.citations)
         )
-        available_citekeys = set(inline_citekeys) | set(
+        available_citekeys = observed_citekeys | set(
             citekey
             for binding in manifest.external_reference_bindings
             for citekey in binding.citekeys
@@ -507,7 +630,7 @@ class CourseSourceInventoryProjector:
             missing_preserved_citekeys=tuple(
                 citekey
                 for citekey in manifest.preserved_citekeys
-                if citekey not in inline_citekeys
+                if citekey not in observed_citekeys
             ),
             unplanned_inline_citekeys=tuple(
                 citekey
@@ -518,6 +641,25 @@ class CourseSourceInventoryProjector:
                 citekey
                 for citekey in cited_citekeys
                 if citekey not in available_citekeys
+            ),
+            missing_planned_citekeys=(
+                tuple(
+                    citekey
+                    for citekey in manifest.planned_citekeys
+                    if citekey not in observed_citekeys
+                )
+                if bibliography_files
+                else ()
+            ),
+            unplanned_bibliography_citekeys=tuple(
+                citekey
+                for citekey in bibliography_citekeys
+                if citekey not in manifest.planned_citekeys
+            ),
+            duplicate_bibliography_citekeys=tuple(
+                citekey
+                for citekey in bibliography_citekeys
+                if bibliography_citekey_counts[citekey] > 1
             ),
         )
 
@@ -615,7 +757,10 @@ class CourseSourceInventoryProjector:
                     else [command.argument]
                 )
                 state.bibliography_declarations.extend(
-                    _normalize_bibliography_path(value.strip())
+                    _resolve_bibliography_target(
+                        value=value.strip(),
+                        state=state,
+                    )
                     for value in values
                 )
 
@@ -625,17 +770,25 @@ class CourseSourceInventoryProjector:
         state: _InventoryState,
     ) -> tuple[SourceFileInventory, ...]:
         ordered = tuple(dict.fromkeys(state.bibliography_declarations))
-        return tuple(
-            _file_inventory(
-                relative_path,
-                _read_course_file(
-                    root=state.root,
-                    relative_path=relative_path,
-                    maximum=_MAX_SOURCE_BYTES,
-                ),
+        files: list[SourceFileInventory] = []
+        for target in ordered:
+            content = _read_course_file(
+                root=target.root,
+                relative_path=target.relative_path,
+                maximum=_MAX_SOURCE_BYTES,
             )
-            for relative_path in ordered
-        )
+            files.append(
+                _file_inventory(
+                    target.relative_path,
+                    content,
+                    root_alias=target.root_alias,
+                    citekeys=_bibtex_citekeys(
+                        content,
+                        relative_path=target.relative_path,
+                    ),
+                )
+            )
+        return tuple(files)
 
     @staticmethod
     def _notebooks(
@@ -684,6 +837,7 @@ class CourseSourceInventoryProjector:
 @dataclass(slots=True)
 class _InventoryState:
     root: Path
+    external_bibliography_roots: tuple[_AuthorizedExternalBibliographyRoot, ...]
     sources: list[SourceFileInventory] = field(default_factory=list)
     includes: list[IncludeInventory] = field(default_factory=list)
     structure: list[StructureInventory] = field(default_factory=list)
@@ -691,7 +845,9 @@ class _InventoryState:
     inline_bibliography: list[InlineBibliographyInventory] = field(
         default_factory=list
     )
-    bibliography_declarations: list[str] = field(default_factory=list)
+    bibliography_declarations: list[_BibliographyTarget] = field(
+        default_factory=list
+    )
     visited: set[str] = field(default_factory=set)
     total_source_bytes: int = 0
 
@@ -771,18 +927,81 @@ def _strip_latex_comments(text: str) -> str:
 
 
 def _authorize_course_root(path: Path) -> Path:
+    return _authorize_private_root(path, label="course root")
+
+
+def _authorize_private_root(path: Path, *, label: str) -> Path:
     candidate = path.expanduser()
     if candidate.is_symlink():
-        raise CourseAuthoringInventoryError("course root must not be a symlink")
+        raise CourseAuthoringInventoryError(f"{label} must not be a symlink")
     try:
         resolved = candidate.resolve(strict=True)
     except OSError as error:
         raise CourseAuthoringInventoryError(
-            "course root does not exist"
+            f"{label} does not exist"
         ) from error
     if not resolved.is_dir():
-        raise CourseAuthoringInventoryError("course root must be a directory")
+        raise CourseAuthoringInventoryError(f"{label} must be a directory")
     return resolved
+
+
+def _authorize_external_bibliography_roots(
+    *,
+    values: tuple[ExternalBibliographyRoot, ...],
+    course_root: Path,
+    course_root_alias: str,
+) -> tuple[_AuthorizedExternalBibliographyRoot, ...]:
+    if type(values) is not tuple:
+        raise CourseAuthoringInventoryError(
+            "external bibliography roots must be an immutable tuple"
+        )
+    if any(type(value) is not ExternalBibliographyRoot for value in values):
+        raise CourseAuthoringInventoryError(
+            "external bibliography roots contain an invalid value"
+        )
+    aliases = tuple(value.alias for value in values)
+    if len(aliases) != len(set(aliases)):
+        raise CourseAuthoringInventoryError(
+            "external bibliography root aliases must be unique"
+        )
+    if course_root_alias in aliases:
+        raise CourseAuthoringInventoryError(
+            "external bibliography root alias collides with the course root"
+        )
+    authorized = tuple(
+        sorted(
+            (
+                _AuthorizedExternalBibliographyRoot(
+                    alias=value.alias,
+                    path=_authorize_private_root(
+                        value.path,
+                        label=(f"external bibliography root {value.alias}"),
+                    ),
+                )
+                for value in values
+            ),
+            key=lambda value: value.alias,
+        )
+    )
+    roots = ((course_root_alias, course_root),) + tuple(
+        (value.alias, value.path) for value in authorized
+    )
+    for index, (left_alias, left_path) in enumerate(roots):
+        for right_alias, right_path in roots[index + 1 :]:
+            if _paths_overlap(left_path, right_path):
+                raise CourseAuthoringInventoryError(
+                    "source roots must not overlap: "
+                    f"{left_alias}, {right_alias}"
+                )
+    return authorized
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    return (
+        left == right
+        or left.is_relative_to(right)
+        or right.is_relative_to(left)
+    )
 
 
 def _course_path(root: Path, relative_path: str) -> Path:
@@ -878,12 +1097,41 @@ def _read_bounded_path(path: Path, *, label: str, maximum: int) -> bytes:
     return content
 
 
-def _file_inventory(relative_path: str, content: bytes) -> SourceFileInventory:
+def _file_inventory(
+    relative_path: str,
+    content: bytes,
+    *,
+    root_alias: str | None = None,
+    citekeys: tuple[str, ...] | None = None,
+) -> SourceFileInventory:
     return SourceFileInventory(
         path=relative_path,
         byte_size=len(content),
         sha256=hashlib.sha256(content).hexdigest(),
+        root_alias=root_alias,
+        citekeys=citekeys,
     )
+
+
+def _bibtex_citekeys(
+    content: bytes,
+    *,
+    relative_path: str,
+) -> tuple[str, ...]:
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise CourseAuthoringInventoryError(
+            f"bibliography file must be UTF-8: {relative_path}"
+        ) from error
+    citekeys = tuple(match.group(1) for match in _BIBTEX_ENTRY.finditer(text))
+    if not citekeys:
+        raise CourseAuthoringInventoryError(
+            f"bibliography file contains no entries: {relative_path}"
+        )
+    for citekey in citekeys:
+        _validate_citekey(citekey, label="bibliography citekey")
+    return citekeys
 
 
 def _normalize_tex_path(value: str) -> str:
@@ -895,13 +1143,80 @@ def _normalize_tex_path(value: str) -> str:
     ).as_posix()
 
 
-def _normalize_bibliography_path(value: str) -> str:
-    candidate = value if PurePosixPath(value).suffix else f"{value}.bib"
-    return _safe_relative_path(
-        candidate,
-        label="bibliography path",
-        suffix=".bib",
-    ).as_posix()
+def _resolve_bibliography_target(
+    *,
+    value: str,
+    state: _InventoryState,
+) -> _BibliographyTarget:
+    candidate_value = value if PurePosixPath(value).suffix else f"{value}.bib"
+    try:
+        local = _safe_relative_path(
+            candidate_value,
+            label="bibliography path",
+            suffix=".bib",
+        )
+    except CourseAuthoringInventoryError as local_error:
+        traversal = _external_bibliography_path(candidate_value)
+        target = Path(
+            os.path.normpath(str(state.root.joinpath(*traversal.parts)))
+        )
+        matches = tuple(
+            root
+            for root in state.external_bibliography_roots
+            if target.is_relative_to(root.path)
+        )
+        if not matches:
+            raise CourseAuthoringInventoryError(
+                "bibliography path escapes every registered root"
+            ) from local_error
+        if len(matches) != 1:
+            raise CourseAuthoringInventoryError(
+                "bibliography path matches multiple registered roots"
+            ) from local_error
+        matched = matches[0]
+        relative = target.relative_to(matched.path).as_posix()
+        safe = _safe_relative_path(
+            relative,
+            label="external bibliography path",
+            suffix=".bib",
+        )
+        return _BibliographyTarget(
+            root=matched.path,
+            relative_path=safe.as_posix(),
+            root_alias=matched.alias,
+        )
+    return _BibliographyTarget(
+        root=state.root,
+        relative_path=local.as_posix(),
+        root_alias=None,
+    )
+
+
+def _external_bibliography_path(value: str) -> PurePosixPath:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or "\\" in value
+        or len(value) > 1_000
+    ):
+        raise CourseAuthoringInventoryError(
+            "bibliography path must be a bounded POSIX relative path"
+        )
+    candidate = PurePosixPath(value)
+    if (
+        candidate.is_absolute()
+        or re.match(r"^[A-Za-z]:", value) is not None
+        or not candidate.parts
+        or value != candidate.as_posix()
+        or candidate.suffix != ".bib"
+        or ".." not in candidate.parts
+        or any(part in {"", "."} for part in candidate.parts)
+    ):
+        raise CourseAuthoringInventoryError(
+            "bibliography path must be a bounded external POSIX path"
+        )
+    return candidate
 
 
 def _safe_relative_path(

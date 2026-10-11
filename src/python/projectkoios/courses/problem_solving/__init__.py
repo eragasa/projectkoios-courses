@@ -38,6 +38,7 @@ from .models import (
     SourceSpan,
     VerificationOutcome,
     text_sha256,
+    validate_problem_identity,
 )
 from .ports import (
     ComputationVerifier,
@@ -89,4 +90,5 @@ __all__ = [
     "SourceSpan",
     "VerificationOutcome",
     "text_sha256",
+    "validate_problem_identity",
 ]

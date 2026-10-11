@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import urllib.error
 import urllib.request
@@ -12,13 +11,23 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
 
-from .models import ProblemSolvingError, ReviewStatus, text_sha256
-
-_GIVEN_LEXEME_RE = re.compile(
-    r"^(?:0|[1-9][0-9]{0,6})(?:\.[0-9]{1,6})?$"
+from .archive import ProposalArchive
+from .bounded_http import (
+    open_local_request,
+    read_bounded_response,
+    validate_loopback_endpoint,
 )
-_PROBLEM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+from .models import (
+    ProblemSolvingError,
+    ReviewStatus,
+    text_sha256,
+    validate_problem_identity,
+)
+
+_GIVEN_LEXEME_RE = re.compile(r"^(?:0|[1-9][0-9]{0,6})(?:\.[0-9]{1,6})?$")
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_MAXIMUM_IDENTITY_RESPONSE_BYTES = 65_536
+_MAXIMUM_RESPONSE_BYTES = 131_072
 _REQUIRED_RESPONSE_KEYS = frozenset(
     {
         "schema",
@@ -59,8 +68,7 @@ class ConversionIntentProblem:
     candidate_given_lexeme: str
 
     def __post_init__(self) -> None:
-        if _PROBLEM_ID_RE.fullmatch(self.problem_id) is None:
-            raise ProblemSolvingError("conversion problem identity is invalid")
+        validate_problem_identity(self.problem_id)
         if self.statement_sha256 != text_sha256(self.statement):
             raise ProblemSolvingError("conversion statement identity mismatch")
         statement_bytes = self.statement.encode("utf-8")
@@ -91,6 +99,7 @@ class ConversionIntentProposal:
     review_status: ReviewStatus = ReviewStatus.AUTOMATED_UNREVIEWED
 
     def __post_init__(self) -> None:
+        validate_problem_identity(self.problem_id)
         if self.schema != "koios.conversion-intent.v1":
             raise ProblemSolvingError("conversion proposal schema is invalid")
         if self.quantity_kind is not ConversionQuantityKind.SPEED:
@@ -146,8 +155,7 @@ class OllamaConversionIntentConfiguration:
         ).hexdigest()
         if prompt_digest != self.system_prompt_sha256:
             raise ProblemSolvingError("system prompt identity mismatch")
-        if not self.endpoint.startswith("http://127.0.0.1:"):
-            raise ProblemSolvingError("Ollama endpoint must be local")
+        validate_loopback_endpoint(self.endpoint)
         if len(self.model_digest) != 64:
             raise ProblemSolvingError("Ollama model digest is invalid")
         if self.temperature != 0 or self.seed < 0 or self.top_k != 1:
@@ -187,6 +195,7 @@ class OllamaConversionIntentProposalEngine:
         configuration: OllamaConversionIntentConfiguration,
     ) -> None:
         self._configuration = configuration
+        self._archive = ProposalArchive(configuration.archive_directory)
 
     def propose(
         self,
@@ -197,24 +206,20 @@ class OllamaConversionIntentProposalEngine:
         request_bytes = self._canonical_bytes(request_payload)
         request_digest = hashlib.sha256(request_bytes).hexdigest()
         stem = f"{problem.problem_id}.{request_digest}"
-        request_path = (
-            self._configuration.archive_directory / f"{stem}.request.json"
-        )
-        response_path = (
-            self._configuration.archive_directory / f"{stem}.response.json"
-        )
-        receipt_path = (
-            self._configuration.archive_directory / f"{stem}.receipt.json"
-        )
-        self._write_or_confirm(request_path, request_bytes)
+        request_path = self._archive.child(f"{stem}.request.json")
+        response_path = self._archive.child(f"{stem}.response.json")
+        receipt_path = self._archive.child(f"{stem}.receipt.json")
+        self._archive.write_or_confirm(request_path, request_bytes)
 
-        if response_path.exists() and not response_path.is_symlink():
-            response_bytes = response_path.read_bytes()
-        else:
+        response_bytes = self._archive.read_optional(
+            response_path,
+            maximum_bytes=_MAXIMUM_RESPONSE_BYTES,
+        )
+        if response_bytes is None:
             try:
                 response_bytes = self._generate(request_bytes)
             except _OllamaHttpResponseError as error:
-                self._write_or_confirm(
+                self._archive.write_or_confirm(
                     response_path,
                     error.response_bytes,
                 )
@@ -225,11 +230,11 @@ class OllamaConversionIntentProposalEngine:
                     "Ollama proposal request failed with HTTP "
                     f"{error.status}; response sha256:{response_sha256}"
                 ) from error
-            self._write_or_confirm(response_path, response_bytes)
+            self._archive.write_or_confirm(response_path, response_bytes)
 
         response_payload = self._strict_json_bytes(
             response_bytes,
-            maximum_bytes=131_072,
+            maximum_bytes=_MAXIMUM_RESPONSE_BYTES,
             label="Ollama response envelope",
         )
         if not isinstance(response_payload, dict):
@@ -253,9 +258,7 @@ class OllamaConversionIntentProposalEngine:
             "model_digest": self._configuration.model_digest,
             "ollama_runtime_version": runtime_version,
             "proposal_output_channel": output_channel,
-            "system_prompt_sha256": (
-                self._configuration.system_prompt_sha256
-            ),
+            "system_prompt_sha256": (self._configuration.system_prompt_sha256),
             "request_sha256": request_digest,
             "response_sha256": hashlib.sha256(response_bytes).hexdigest(),
             "proposal_sha256": hashlib.sha256(
@@ -279,7 +282,10 @@ class OllamaConversionIntentProposalEngine:
                 "verification_claim",
             ],
         }
-        self._write_or_confirm(receipt_path, self._canonical_bytes(receipt))
+        self._archive.write_or_confirm(
+            receipt_path,
+            self._canonical_bytes(receipt),
+        )
         return proposal
 
     def _generate(self, request_bytes: bytes) -> bytes:
@@ -293,17 +299,24 @@ class OllamaConversionIntentProposalEngine:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(
+            with open_local_request(
                 request,
                 timeout=self._configuration.timeout_seconds,
             ) as response:
-                response_bytes = response.read(131_073)
+                response_bytes = read_bounded_response(
+                    response,
+                    maximum_bytes=_MAXIMUM_RESPONSE_BYTES,
+                    label="Ollama response envelope",
+                )
         except urllib.error.HTTPError as error:
-            response_bytes = error.read(131_073)
-            if len(response_bytes) > 131_072:
-                raise ProblemSolvingError(
-                    "Ollama error response exceeds its byte limit"
-                ) from error
+            try:
+                response_bytes = read_bounded_response(
+                    error,
+                    maximum_bytes=_MAXIMUM_RESPONSE_BYTES,
+                    label="Ollama error response",
+                )
+            finally:
+                error.close()
             raise _OllamaHttpResponseError(
                 error.code,
                 response_bytes,
@@ -312,11 +325,7 @@ class OllamaConversionIntentProposalEngine:
             raise ProblemSolvingError(
                 f"Ollama proposal request failed: {error}"
             ) from error
-        if len(response_bytes) > 131_072:
-            raise ProblemSolvingError(
-                "Ollama response envelope exceeds its byte limit"
-            )
-        return cast(bytes, response_bytes)
+        return response_bytes
 
     def _validate_engine_identity(self) -> str:
         tags = self._get_json("/api/tags")
@@ -327,8 +336,7 @@ class OllamaConversionIntentProposalEngine:
         ]
         if (
             len(matches) != 1
-            or matches[0].get("digest")
-            != self._configuration.model_digest
+            or matches[0].get("digest") != self._configuration.model_digest
         ):
             raise ProblemSolvingError(
                 "configured Ollama model identity is unavailable"
@@ -353,11 +361,21 @@ class OllamaConversionIntentProposalEngine:
             headers={"Accept": "application/json"},
         )
         try:
-            with urllib.request.urlopen(
+            with open_local_request(
                 request,
                 timeout=self._configuration.timeout_seconds,
             ) as response:
-                payload = json.load(response)
+                body = read_bounded_response(
+                    response,
+                    maximum_bytes=_MAXIMUM_IDENTITY_RESPONSE_BYTES,
+                    label="Ollama identity response",
+                )
+            payload = json.loads(body)
+        except urllib.error.HTTPError as error:
+            error.close()
+            raise ProblemSolvingError(
+                f"Ollama identity request failed: {error}"
+            ) from error
         except Exception as error:
             raise ProblemSolvingError(
                 f"Ollama identity request failed: {error}"
@@ -408,9 +426,7 @@ class OllamaConversionIntentProposalEngine:
             value = response_payload.get(channel)
             if isinstance(value, str) and value.strip():
                 return channel, value
-        raise ProblemSolvingError(
-            "Ollama response contains no proposal output"
-        )
+        raise ProblemSolvingError("Ollama response contains no proposal output")
 
     def _strict_proposal_payload(self, text: str) -> dict[str, object]:
         try:
@@ -544,30 +560,6 @@ class OllamaConversionIntentProposalEngine:
         ).encode("utf-8")
 
     @staticmethod
-    def _write_or_confirm(path: Path, payload: bytes) -> None:
-        if path.is_symlink():
-            raise ProblemSolvingError(
-                f"proposal archive symlink is forbidden: {path.name}"
-            )
-        if path.exists():
-            if path.read_bytes() != payload:
-                raise ProblemSolvingError(
-                    f"proposal archive collision: {path.name}"
-                )
-            return
-        temporary = path.with_name(f".{path.name}.tmp")
-        if temporary.exists() or temporary.is_symlink():
-            raise ProblemSolvingError(
-                f"proposal temporary collision: {temporary.name}"
-            )
-        with temporary.open("xb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, path)
-
-    @staticmethod
     def _output_schema() -> dict[str, Any]:
         return {
             "type": "object",
@@ -600,8 +592,7 @@ class OllamaConversionIntentProposalEngine:
                     "items": {
                         "type": "string",
                         "const": (
-                            ConversionAssumption
-                            .NON_NEGATIVE_SCALAR_SPEED
+                            ConversionAssumption.NON_NEGATIVE_SCALAR_SPEED
                         ),
                     },
                     "minItems": 1,

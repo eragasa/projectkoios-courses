@@ -1,0 +1,85 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Protocol
+
+from projectkoios.courses.reference_resolution_taxonomy import (
+    CourseReferenceActionRequest,
+    CourseReferenceActionResult,
+    CourseReferenceActionizer,
+    CourseReferenceDataObject,
+)
+
+
+class FixtureError(ValueError):
+    """An allowed error role."""
+
+
+class FixtureKind(StrEnum):
+    """An allowed enum role."""
+
+    VALUE = "value"
+
+
+class FixtureAction(Protocol):
+    """An allowed structural action protocol."""
+
+    def action(self, *, request: FixtureRequest) -> FixtureResult:
+        """Return a result."""
+
+
+def _normalize(value: str) -> str:
+    return value.strip()
+
+
+@dataclass(frozen=True, slots=True)
+class FixtureValue(CourseReferenceDataObject):
+    """An allowed passive immutable data object."""
+
+    value: str
+
+    def __post_init__(self) -> None:
+        if self.value != _normalize(self.value):
+            raise FixtureError("value must be normalized")
+
+
+@dataclass(frozen=True, slots=True)
+class FixtureRequest(CourseReferenceActionRequest):
+    """An allowed action request."""
+
+    values: tuple[FixtureValue, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class FixtureResult(CourseReferenceActionResult):
+    """An allowed action result."""
+
+    values: tuple[FixtureValue, ...]
+
+
+class DocstringInitializerActionizer(
+    CourseReferenceActionizer[FixtureRequest, FixtureResult]
+):
+    """An allowed stateless initializer and action."""
+
+    __slots__ = ()
+
+    def __init__(self) -> None:
+        """Initialize without state or effects."""
+
+    def action(self, *, request: FixtureRequest) -> FixtureResult:
+        """Return the exact typed tuple in one result."""
+        return FixtureResult(values=request.values)
+
+
+class FixtureActionizer(
+    CourseReferenceActionizer[FixtureRequest, FixtureResult]
+):
+    """An allowed single-action actionizer."""
+
+    __slots__ = ()
+
+    def action(self, *, request: FixtureRequest) -> FixtureResult:
+        """Return the exact typed tuple in one result."""
+        return FixtureResult(values=request.values)

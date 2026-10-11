@@ -10,6 +10,7 @@ authors = [
 ]
 
 [project.scripts]
+koios-course-inventory = "projectkoios.courses.authoring_inventory_cli:main"
 koios-course-sanitize = "projectkoios.courses.cli:main"
 koios-course-propose-conversion-intent = "projectkoios.courses.problem_solving.conversion_intent_cli:main"
 
@@ -48,4 +49,5 @@ mypy_path = "src/python"
 namespace_packages = true
 explicit_package_bases = true
 strict = true
-files = ["src/python", "tests"]
+plugins = ["tools.course_reference_resolution_mypy"]
+files = ["src/python", "tests", "tools"]

@@ -28,6 +28,24 @@ PROMPT = (
 MODEL_DIGEST = "a" * 64
 
 
+@pytest.fixture(autouse=True)
+def route_test_http_through_urlopen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def open_request(
+        request: urllib.request.Request,
+        *,
+        timeout: int,
+    ) -> object:
+        return urllib.request.urlopen(request, timeout=timeout)
+
+    monkeypatch.setattr(
+        "projectkoios.courses.problem_solving.conversion_intent."
+        "open_local_request",
+        open_request,
+    )
+
+
 class JsonResponse(io.BytesIO):
     def __enter__(self) -> JsonResponse:
         return self
@@ -94,11 +112,7 @@ def model_response(payload: object) -> dict[str, object]:
 def identity_responses() -> tuple[JsonResponse, JsonResponse]:
     return (
         response(
-            {
-                "models": [
-                    {"name": "test-model:1", "digest": MODEL_DIGEST}
-                ]
-            }
+            {"models": [{"name": "test-model:1", "digest": MODEL_DIGEST}]}
         ),
         response({"version": "0.34.2"}),
     )
@@ -118,6 +132,7 @@ def test__propose__archives_strict_intent_without_computation(
     with patch("urllib.request.urlopen", side_effect=responses):
         proposal = engine.propose(problem())
 
+    assert all(item.closed for item in responses)
     assert proposal.given_lexeme == "55.0"
     assert proposal.quantity_kind is ConversionQuantityKind.SPEED
     assert proposal.source_unit is ConversionUnit.MILE_PER_HOUR
@@ -126,9 +141,7 @@ def test__propose__archives_strict_intent_without_computation(
         ConversionAssumption.NON_NEGATIVE_SCALAR_SPEED,
     )
     assert proposal.review_status is ReviewStatus.AUTOMATED_UNREVIEWED
-    assert proposal.identity.startswith(
-        "conversion-intent-proposal:sha256:"
-    )
+    assert proposal.identity.startswith("conversion-intent-proposal:sha256:")
 
     artifacts = sorted(archive.iterdir())
     assert len(artifacts) == 3
@@ -270,6 +283,7 @@ def test__propose__archives_http_error_response(tmp_path: Path) -> None:
     response_path = next(archive.glob("*.response.json"))
     assert response_path.read_bytes() == error_body
     assert response_path.stat().st_mode & 0o777 == 0o600
+    assert http_error.closed
     assert not tuple(archive.glob("*.receipt.json"))
 
 

@@ -1,0 +1,49 @@
+{
+  "course_id": "dlsu.phy627m.gs1",
+  "main_tex": "main.tex",
+  "notebook_directories": [
+    "notebooks"
+  ],
+  "reference_scope": {
+    "external_bindings": [
+      {
+        "citekey_status": "proposed-noncanonical",
+        "citekeys": [
+          "kittel2005",
+          "simon2013",
+          "ashcroftMermin1976",
+          "marder2010"
+        ],
+        "identity_status": "unaccepted-candidate",
+        "owner": "projectkoios-references",
+        "source_id": "catalog-collection:solidstate",
+        "source_revision": "sha256:7dd122cea8987c9e08f0d54fca1742e2b99ef2d05aa560d34ba67307965d1506"
+      },
+      {
+        "citekey_status": "proposed-noncanonical",
+        "citekeys": [
+          "szeNg2007",
+          "neamen2003",
+          "szeLee2012",
+          "yuCardona2010",
+          "rudan2015"
+        ],
+        "identity_status": "unaccepted-candidate",
+        "owner": "projectkoios-references",
+        "source_id": "catalog-collection:semiconductorphysics",
+        "source_revision": "sha256:584bd4512fd3c47fe00251f36da4f36974f1fdd2adef0f1036d75a67a92429e7"
+      }
+    ],
+    "preserved_citekeys": [
+      "deBroglie1925",
+      "Shankar1994",
+      "Hellmann1937",
+      "Feynman1939",
+      "Xiao2010"
+    ]
+  },
+  "root_alias": "solidstate2-private-manuscript",
+  "schema_id": "projectkoios.courses.authoring-manifest",
+  "schema_version": 1,
+  "title": "Solid State Physics II"
+}

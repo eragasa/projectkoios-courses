@@ -1,0 +1,93 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from projectkoios.courses.reference_resolution import _content_identity
+from projectkoios.courses.reference_resolution_taxonomy import (
+    CourseReferenceActionRequest,
+    CourseReferenceActionResult,
+    CourseReferenceActionizer,
+    CourseReferenceDataObject,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _PrivateValue(CourseReferenceDataObject):
+    value: str
+
+
+@dataclass(frozen=True, slots=True)
+class OuterValue(CourseReferenceDataObject):
+    value: str
+
+    @dataclass(frozen=True, slots=True)
+    class NestedValue(CourseReferenceDataObject):
+        value: str
+
+
+class UntypedFacade:
+    def run(self) -> None:
+        return None
+
+
+@dataclass(frozen=False, slots=False)
+class MutableValue(CourseReferenceDataObject):
+    value: str
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveValue(CourseReferenceDataObject):
+    value: str
+
+    def render(self) -> str:
+        return self.value
+
+
+@dataclass(frozen=True, slots=True)
+class FixtureRequest(CourseReferenceActionRequest):
+    value: str
+
+
+@dataclass(frozen=True, slots=True)
+class FixtureResult(CourseReferenceActionResult):
+    value: str
+
+
+class MultiVerbActionizer(
+    CourseReferenceActionizer[FixtureRequest, FixtureResult]
+):
+    def action(self, *, request: FixtureRequest) -> FixtureResult:
+        return FixtureResult(value=request.value)
+
+    def preview(self) -> None:
+        return None
+
+
+class PrivateHelperActionizer(
+    CourseReferenceActionizer[FixtureRequest, FixtureResult]
+):
+    def action(self, *, request: FixtureRequest) -> FixtureResult:
+        return FixtureResult(value=self._normalize(request.value))
+
+    def _normalize(self, value: str) -> str:
+        return value.strip()
+
+
+class StatefulActionizer(
+    CourseReferenceActionizer[FixtureRequest, FixtureResult]
+):
+    def __init__(self) -> None:
+        self.prefix = "stateful"
+
+    def action(self, *, request: FixtureRequest) -> FixtureResult:
+        return FixtureResult(value=f"{self.prefix}:{request.value}")
+
+
+class FixtureFactory(
+    CourseReferenceActionizer[FixtureRequest, FixtureResult]
+):
+    def action(self, *, request: FixtureRequest) -> FixtureResult:
+        return FixtureResult(value=request.value)
+
+
+assert _content_identity("fixture", {})

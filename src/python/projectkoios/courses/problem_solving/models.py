@@ -5,6 +5,8 @@ import json
 from dataclasses import dataclass
 from enum import StrEnum
 
+from projectkoios.courses.identities import validate_nominal_identity
+
 
 class ProblemSolvingError(ValueError):
     """Raised when problem-solving domain invariants are violated."""
@@ -68,10 +70,9 @@ class ProblemMaterial:
     corpus_role: CorpusRole = CorpusRole.PROBLEM_MATERIAL
 
     def __post_init__(self) -> None:
-        if not self.problem_id or not self.statement.strip():
-            raise ProblemSolvingError(
-                "problem identity and statement are required"
-            )
+        validate_problem_identity(self.problem_id)
+        if not self.statement.strip():
+            raise ProblemSolvingError("problem statement is required")
         if self.statement_sha256 != text_sha256(self.statement):
             raise ProblemSolvingError("problem statement identity mismatch")
         if self.corpus_role is not CorpusRole.PROBLEM_MATERIAL:
@@ -95,9 +96,7 @@ class EvidencePassage:
             raise ProblemSolvingError("evidence identity and text are required")
         if not isinstance(self.corpus_role, CorpusRole):
             raise ProblemSolvingError("evidence corpus role must be explicit")
-        if len(set(self.admitted_purposes)) != len(
-            self.admitted_purposes
-        ):
+        if len(set(self.admitted_purposes)) != len(self.admitted_purposes):
             raise ProblemSolvingError(
                 "evidence purpose admissions must be unique"
             )
@@ -119,10 +118,9 @@ class RetrievalRequest:
     limit: int
 
     def __post_init__(self) -> None:
-        if not self.query.strip() or not self.problem_id:
-            raise ProblemSolvingError(
-                "retrieval query and problem id are required"
-            )
+        validate_problem_identity(self.problem_id)
+        if not self.query.strip():
+            raise ProblemSolvingError("retrieval query is required")
         if self.purpose is not RetrievalPurpose.PROBLEM_SOLVING:
             raise ProblemSolvingError(
                 "problem-solving retrieval purpose is required"
@@ -223,6 +221,9 @@ class SolutionDraft:
     analytical_work: AnalyticalWork
     computation_plan: ComputationPlan | None
 
+    def __post_init__(self) -> None:
+        validate_problem_identity(self.problem_id)
+
 
 @dataclass(frozen=True)
 class SolutionCandidate:
@@ -243,3 +244,10 @@ class SolutionCandidate:
 
 def text_sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def validate_problem_identity(value: str) -> None:
+    try:
+        validate_nominal_identity(value, label="problem identity")
+    except ValueError as error:
+        raise ProblemSolvingError(str(error)) from error

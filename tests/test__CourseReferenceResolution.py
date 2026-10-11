@@ -2,16 +2,23 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 from projectkoios.courses import (
     CourseAuthoringManifest,
     CourseReferenceDisplayCitekeyStatus,
     CourseReferenceLocatorBinding,
+    CourseReferenceResolutionActionizer,
     CourseReferenceResolutionError,
-    CourseReferenceResolutionProjector,
+    CourseReferenceResolutionRequest,
+    CourseReferenceResolutionScope,
     CourseSourceInventory,
     CourseSourceInventoryProjector,
+    course_reference_resolution_next_selection_id,
+    course_reference_resolution_previous_selection_id,
+    course_reference_resolution_scope_as_dict,
+    course_reference_resolution_window,
 )
 
 
@@ -106,23 +113,36 @@ def _bindings() -> tuple[CourseReferenceLocatorBinding, ...]:
     )
 
 
+def _project(
+    *,
+    manifest: CourseAuthoringManifest,
+    inventory: CourseSourceInventory,
+    locator_bindings: tuple[CourseReferenceLocatorBinding, ...],
+) -> CourseReferenceResolutionScope:
+    return CourseReferenceResolutionActionizer().action(
+        request=CourseReferenceResolutionRequest(
+            manifest=manifest,
+            inventory=inventory,
+            locator_bindings=locator_bindings,
+        )
+    )
+
+
 def test__project__creates_versioned_revision_bound_ordered_scope(
     tmp_path: Path,
 ) -> None:
     manifest, inventory = _inventory(tmp_path)
-    projector = CourseReferenceResolutionProjector()
-
-    first = projector.project(
+    first = _project(
         manifest=manifest,
         inventory=inventory,
         locator_bindings=_bindings(),
     )
-    second = projector.project(
+    second = _project(
         manifest=manifest,
         inventory=inventory,
         locator_bindings=_bindings(),
     )
-    payload = first.as_dict()
+    payload = course_reference_resolution_scope_as_dict(first)
 
     assert first == second
     assert first.scope_id == second.scope_id
@@ -144,18 +164,19 @@ def test__project__creates_versioned_revision_bound_ordered_scope(
         "proposed-noncanonical",
         "proposed-noncanonical",
     ]
-    assert payload["selections"][0]["previous_selection_id"] is None
-    assert payload["selections"][0]["next_selection_id"] == (
+    selections = cast(list[dict[str, object]], payload["selections"])
+    assert selections[0]["previous_selection_id"] is None
+    assert selections[0]["next_selection_id"] == (
         first.selections[1].selection_id
     )
-    assert payload["selections"][2]["next_selection_id"] is None
+    assert selections[2]["next_selection_id"] is None
 
 
 def test__navigation__derives_previous_next_and_windows_purely(
     tmp_path: Path,
 ) -> None:
     manifest, inventory = _inventory(tmp_path)
-    scope = CourseReferenceResolutionProjector().project(
+    scope = _project(
         manifest=manifest,
         inventory=inventory,
         locator_bindings=_bindings(),
@@ -163,35 +184,48 @@ def test__navigation__derives_previous_next_and_windows_purely(
 
     middle = scope.selections[1].selection_id
     assert (
-        scope.previous_selection_id(middle) == scope.selections[0].selection_id
+        course_reference_resolution_previous_selection_id(scope, middle)
+        == scope.selections[0].selection_id
     )
-    assert scope.next_selection_id(middle) == scope.selections[2].selection_id
-    assert scope.previous_selection_id(scope.selections[0].selection_id) is None
-    assert scope.next_selection_id(scope.selections[2].selection_id) is None
+    assert (
+        course_reference_resolution_next_selection_id(scope, middle)
+        == scope.selections[2].selection_id
+    )
+    assert (
+        course_reference_resolution_previous_selection_id(
+            scope, scope.selections[0].selection_id
+        )
+        is None
+    )
+    assert (
+        course_reference_resolution_next_selection_id(
+            scope, scope.selections[2].selection_id
+        )
+        is None
+    )
 
-    first = scope.window(offset=0, limit=2)
-    second = scope.window(offset=2, limit=2)
+    first = course_reference_resolution_window(scope, offset=0, limit=2)
+    second = course_reference_resolution_window(scope, offset=2, limit=2)
     assert first.previous_offset is None
     assert first.next_offset == 2
     assert [value.ordinal for value in first.selections] == [1, 2]
     assert second.previous_offset == 0
     assert second.next_offset is None
     assert [value.ordinal for value in second.selections] == [3]
-    assert first == scope.window(offset=0, limit=2)
+    assert first == course_reference_resolution_window(scope, offset=0, limit=2)
 
 
 def test__project__rejects_missing_extra_and_duplicate_locators(
     tmp_path: Path,
 ) -> None:
     manifest, inventory = _inventory(tmp_path)
-    projector = CourseReferenceResolutionProjector()
     bindings = _bindings()
 
     with pytest.raises(
         CourseReferenceResolutionError,
         match="missing selected references",
     ):
-        projector.project(
+        _project(
             manifest=manifest,
             inventory=inventory,
             locator_bindings=bindings[:-1],
@@ -200,7 +234,7 @@ def test__project__rejects_missing_extra_and_duplicate_locators(
         CourseReferenceResolutionError,
         match="extra selected references",
     ):
-        projector.project(
+        _project(
             manifest=manifest,
             inventory=inventory,
             locator_bindings=bindings + (bindings[-1],),
@@ -217,7 +251,7 @@ def test__project__rejects_missing_extra_and_duplicate_locators(
         CourseReferenceResolutionError,
         match="must be one-to-one",
     ):
-        projector.project(
+        _project(
             manifest=manifest,
             inventory=inventory,
             locator_bindings=bindings[:2] + (duplicate,),
@@ -228,7 +262,6 @@ def test__project__rejects_order_or_status_instead_of_joining_by_citekey(
     tmp_path: Path,
 ) -> None:
     manifest, inventory = _inventory(tmp_path)
-    projector = CourseReferenceResolutionProjector()
     bindings = _bindings()
     swapped = (
         bindings[0],
@@ -250,7 +283,7 @@ def test__project__rejects_order_or_status_instead_of_joining_by_citekey(
         CourseReferenceResolutionError,
         match="citekeys differ from course selection order",
     ):
-        projector.project(
+        _project(
             manifest=manifest,
             inventory=inventory,
             locator_bindings=swapped,
@@ -267,7 +300,7 @@ def test__project__rejects_order_or_status_instead_of_joining_by_citekey(
         CourseReferenceResolutionError,
         match="status differs from course selection origin",
     ):
-        projector.project(
+        _project(
             manifest=manifest,
             inventory=inventory,
             locator_bindings=(wrong_status,) + bindings[1:],
@@ -276,14 +309,13 @@ def test__project__rejects_order_or_status_instead_of_joining_by_citekey(
 
 def test__project__rejects_stale_manifest_and_inventory(tmp_path: Path) -> None:
     manifest, inventory = _inventory(tmp_path)
-    projector = CourseReferenceResolutionProjector()
     object.__setattr__(manifest, "manifest_id", f"manifest:sha256:{'f' * 64}")
 
     with pytest.raises(
         CourseReferenceResolutionError,
         match="manifest identity is stale",
     ):
-        projector.project(
+        _project(
             manifest=manifest,
             inventory=inventory,
             locator_bindings=_bindings(),
@@ -297,7 +329,7 @@ def test__project__rejects_stale_manifest_and_inventory(tmp_path: Path) -> None:
         CourseReferenceResolutionError,
         match="inventory identity is stale",
     ):
-        projector.project(
+        _project(
             manifest=manifest,
             inventory=inventory,
             locator_bindings=_bindings(),
@@ -313,7 +345,7 @@ def test__project__rejects_stale_locator_binding(tmp_path: Path) -> None:
         CourseReferenceResolutionError,
         match="locator binding identity is stale",
     ):
-        CourseReferenceResolutionProjector().project(
+        _project(
             manifest=manifest,
             inventory=inventory,
             locator_bindings=bindings,
@@ -339,7 +371,7 @@ def test__project__rejects_incomplete_inventory(tmp_path: Path) -> None:
         CourseReferenceResolutionError,
         match="inventory must be complete",
     ):
-        CourseReferenceResolutionProjector().project(
+        _project(
             manifest=manifest,
             inventory=incomplete,
             locator_bindings=_bindings(),
@@ -348,18 +380,20 @@ def test__project__rejects_incomplete_inventory(tmp_path: Path) -> None:
 
 def test__limits_and_unknown_navigation_fail_closed(tmp_path: Path) -> None:
     manifest, inventory = _inventory(tmp_path)
-    scope = CourseReferenceResolutionProjector().project(
+    scope = _project(
         manifest=manifest,
         inventory=inventory,
         locator_bindings=_bindings(),
     )
 
     with pytest.raises(CourseReferenceResolutionError, match="limit exceeds"):
-        scope.window(offset=0, limit=101)
+        course_reference_resolution_window(scope, offset=0, limit=101)
     with pytest.raises(CourseReferenceResolutionError, match="offset exceeds"):
-        scope.window(offset=4, limit=1)
+        course_reference_resolution_window(scope, offset=4, limit=1)
     with pytest.raises(CourseReferenceResolutionError, match="absent"):
-        scope.next_selection_id("course-reference-selection:sha256:missing")
+        course_reference_resolution_next_selection_id(
+            scope, "course-reference-selection:sha256:missing"
+        )
     with pytest.raises(
         CourseReferenceResolutionError,
         match="bounded opaque identity",

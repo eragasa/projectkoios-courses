@@ -14,6 +14,12 @@ from .authoring_inventory import (
     CourseAuthoringManifest,
     CourseSourceInventory,
 )
+from .reference_resolution_taxonomy import (
+    CourseReferenceActionizer,
+    CourseReferenceActionRequest,
+    CourseReferenceActionResult,
+    CourseReferenceDataObject,
+)
 
 _CITEKEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+-]{0,199}")
 _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+-]{0,1023}")
@@ -44,27 +50,8 @@ class CourseReferenceDisplayCitekeyStatus(StrEnum):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class CourseReferenceLocatorBinding:
-    """Carry one opaque References-owned locator into Courses composition.
-
-    Parameters
-    ----------
-    ordinal
-        One-based position in the exact course-selected reference scope.
-    display_citekey
-        Course-visible observed or proposed locator. It is not accepted
-        citekey authority.
-    display_citekey_status
-        Explicit observed/proposed status for ``display_citekey``.
-    reference_locator
-        Opaque exact locator supplied by References-owned composition. Courses
-        validates only bounded identity syntax and never interprets its schema.
-
-    Raises
-    ------
-    CourseReferenceResolutionError
-        If a position, citekey, status, or opaque locator is malformed.
-    """
+class CourseReferenceLocatorBinding(CourseReferenceDataObject):
+    """Carry one opaque References-owned locator into Courses composition."""
 
     CONTRACT_VERSION: ClassVar[str] = "1.0"
     MAX_LOCATOR_CHARACTERS: ClassVar[int] = 1_024
@@ -109,52 +96,10 @@ class CourseReferenceLocatorBinding:
             ),
         )
 
-    def as_dict(self) -> dict[str, object]:
-        """Return the stable composition representation."""
-
-        return {
-            "binding_id": self.binding_id,
-            "contract_version": self.CONTRACT_VERSION,
-            "display_citekey": self.display_citekey,
-            "display_citekey_status": self.display_citekey_status.value,
-            "ordinal": self.ordinal,
-            "reference_locator": self.reference_locator,
-            "reference_owner": self.REFERENCE_OWNER,
-        }
-
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class CourseReferenceSelection:
-    """Represent one immutable course-selected reference queue item.
-
-    Parameters
-    ----------
-    course_id
-        Course owning selection and navigation semantics.
-    manifest_id
-        Exact authoring-manifest revision identity.
-    inventory_id
-        Exact observed source-inventory revision identity.
-    ordinal
-        One-based stable position in the selected scope.
-    origin
-        Course-owned reason for inclusion.
-    role
-        Course-owned use role, without claim-support meaning.
-    display_citekey
-        Observed or proposed display locator.
-    display_citekey_status
-        Non-authoritative display locator status.
-    reference_locator
-        Opaque References-owned locator supplied by composition.
-    locator_binding_id
-        Identity of the exact locator binding used for this selection.
-
-    Raises
-    ------
-    CourseReferenceResolutionError
-        If a field is malformed or the bounded role is unsupported.
-    """
+class CourseReferenceSelection(CourseReferenceDataObject):
+    """Represent one immutable course-selected reference queue item."""
 
     CONTRACT_VERSION: ClassVar[str] = "1.0"
     REFERENCE_OWNER: ClassVar[str] = "projectkoios-references"
@@ -221,51 +166,28 @@ class CourseReferenceSelection:
             ),
         )
 
-    def as_dict(self) -> dict[str, object]:
-        """Return the stable queue-item representation."""
 
-        return {
-            "course_id": self.course_id,
-            "display_citekey": self.display_citekey,
-            "display_citekey_status": self.display_citekey_status.value,
-            "inventory_id": self.inventory_id,
-            "locator_binding_id": self.locator_binding_id,
-            "manifest_id": self.manifest_id,
-            "ordinal": self.ordinal,
-            "origin": self.origin.value,
-            "reference_locator": self.reference_locator,
-            "reference_owner": self.REFERENCE_OWNER,
-            "role": self.role.value,
-            "selection_id": self.selection_id,
-        }
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CourseReferenceResolutionRequest(CourseReferenceActionRequest):
+    """Carry complete inputs for one course resolution-scope action."""
+
+    manifest: CourseAuthoringManifest
+    inventory: CourseSourceInventory
+    locator_bindings: tuple[CourseReferenceLocatorBinding, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.locator_bindings) is not tuple or any(
+            type(value) is not CourseReferenceLocatorBinding
+            for value in self.locator_bindings
+        ):
+            raise CourseReferenceResolutionError(
+                "locator bindings must be an exact immutable tuple"
+            )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class CourseReferenceResolutionWindow:
-    """Represent one deterministic bounded window over a resolution scope.
-
-    Parameters
-    ----------
-    scope_id
-        Exact parent scope identity.
-    offset
-        Zero-based start position.
-    limit
-        Requested positive window bound.
-    total
-        Total number of scope selections.
-    selections
-        Exact ordered scope slice.
-    previous_offset
-        Previous window start, or ``None`` at the beginning.
-    next_offset
-        Next window start, or ``None`` after the final item.
-
-    Raises
-    ------
-    CourseReferenceResolutionError
-        If counts, offsets, order, or navigation are inconsistent.
-    """
+class CourseReferenceResolutionWindow(CourseReferenceActionResult):
+    """Represent one deterministic bounded window over a resolution scope."""
 
     CONTRACT_VERSION: ClassVar[str] = "1.0"
     MAX_WINDOW_SIZE: ClassVar[int] = 100
@@ -344,45 +266,10 @@ class CourseReferenceResolutionWindow:
             ),
         )
 
-    def as_dict(self) -> dict[str, object]:
-        """Return the stable window representation."""
-
-        return {
-            "limit": self.limit,
-            "next_offset": self.next_offset,
-            "offset": self.offset,
-            "previous_offset": self.previous_offset,
-            "scope_id": self.scope_id,
-            "selections": [value.as_dict() for value in self.selections],
-            "total": self.total,
-            "window_id": self.window_id,
-        }
-
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class CourseReferenceResolutionScope:
-    """Own one exact ordered course reference-resolution queue.
-
-    Parameters
-    ----------
-    course_id
-        Course owning the selected reference scope.
-    course_title
-        Course-owned display context.
-    manifest_id
-        Exact current authoring-manifest identity.
-    manifest_sha256
-        Exact manifest file-byte revision.
-    inventory_id
-        Exact current source-inventory identity.
-    selections
-        Complete ordered immutable selected-reference tuple.
-
-    Raises
-    ------
-    CourseReferenceResolutionError
-        If context, revisions, selection count, order, or uniqueness is invalid.
-    """
+class CourseReferenceResolutionScope(CourseReferenceActionResult):
+    """Own one exact ordered course reference-resolution queue."""
 
     CONTRACT_NAME: ClassVar[str] = "course-reference-resolution-scope"
     CONTRACT_VERSION: ClassVar[str] = "1.0"
@@ -474,173 +361,26 @@ class CourseReferenceResolutionScope:
             ),
         )
 
-    def previous_selection_id(self, selection_id: str) -> str | None:
-        """Return the preceding selection identity.
 
-        Parameters
-        ----------
-        selection_id
-            Exact member selection identity.
-
-        Returns
-        -------
-        str | None
-            Previous identity, or ``None`` for the first selection.
-
-        Raises
-        ------
-        CourseReferenceResolutionError
-            If ``selection_id`` is not a member of this scope.
-        """
-
-        index = self._selection_index(selection_id)
-        return None if index == 0 else self.selections[index - 1].selection_id
-
-    def next_selection_id(self, selection_id: str) -> str | None:
-        """Return the following selection identity.
-
-        Parameters
-        ----------
-        selection_id
-            Exact member selection identity.
-
-        Returns
-        -------
-        str | None
-            Next identity, or ``None`` for the final selection.
-
-        Raises
-        ------
-        CourseReferenceResolutionError
-            If ``selection_id`` is not a member of this scope.
-        """
-
-        index = self._selection_index(selection_id)
-        if index + 1 == self.total:
-            return None
-        return self.selections[index + 1].selection_id
-
-    def window(
-        self,
-        *,
-        offset: int,
-        limit: int,
-    ) -> CourseReferenceResolutionWindow:
-        """Return one deterministic bounded selection window.
-
-        Parameters
-        ----------
-        offset
-            Zero-based start position in this scope.
-        limit
-            Positive requested item bound, at most 100.
-
-        Returns
-        -------
-        CourseReferenceResolutionWindow
-            Exact scope slice with previous/next offsets.
-
-        Raises
-        ------
-        CourseReferenceResolutionError
-            If either bound is malformed or outside supported limits.
-        """
-
-        _require_nonnegative_int(offset, label="window offset")
-        _require_positive_int(limit, label="window limit")
-        if offset > self.total:
-            raise CourseReferenceResolutionError("window offset exceeds total")
-        if limit > CourseReferenceResolutionWindow.MAX_WINDOW_SIZE:
-            raise CourseReferenceResolutionError(
-                "window limit exceeds its bound"
-            )
-        selections = self.selections[offset : offset + limit]
-        previous_offset = max(0, offset - limit) if offset else None
-        consumed = offset + len(selections)
-        next_offset = consumed if consumed < self.total else None
-        return CourseReferenceResolutionWindow(
-            scope_id=self.scope_id,
-            offset=offset,
-            limit=limit,
-            total=self.total,
-            selections=selections,
-            previous_offset=previous_offset,
-            next_offset=next_offset,
-        )
-
-    def as_dict(self) -> dict[str, object]:
-        """Return the stable course scope with per-item navigation."""
-
-        values: list[dict[str, object]] = []
-        for index, selection in enumerate(self.selections):
-            value = selection.as_dict()
-            value["previous_selection_id"] = (
-                None if index == 0 else self.selections[index - 1].selection_id
-            )
-            value["next_selection_id"] = (
-                None
-                if index + 1 == self.total
-                else self.selections[index + 1].selection_id
-            )
-            values.append(value)
-        return {
-            "contract_name": self.CONTRACT_NAME,
-            "contract_version": self.CONTRACT_VERSION,
-            "course_id": self.course_id,
-            "course_title": self.course_title,
-            "inventory_id": self.inventory_id,
-            "manifest_id": self.manifest_id,
-            "manifest_sha256": self.manifest_sha256,
-            "scope_id": self.scope_id,
-            "selections": values,
-            "total": self.total,
-        }
-
-    def _selection_index(self, selection_id: str) -> int:
-        _require_identity(selection_id, label="selection ID")
-        for index, selection in enumerate(self.selections):
-            if selection.selection_id == selection_id:
-                return index
-        raise CourseReferenceResolutionError(
-            "selection identity is absent from this scope"
-        )
-
-
-class CourseReferenceResolutionProjector:
+class CourseReferenceResolutionActionizer(
+    CourseReferenceActionizer[
+        CourseReferenceResolutionRequest,
+        CourseReferenceResolutionScope,
+    ]
+):
     """Project explicit course and locator inputs into one immutable scope."""
 
     __slots__ = ()
 
-    def project(
+    def action(
         self,
         *,
-        manifest: CourseAuthoringManifest,
-        inventory: CourseSourceInventory,
-        locator_bindings: tuple[CourseReferenceLocatorBinding, ...],
+        request: CourseReferenceResolutionRequest,
     ) -> CourseReferenceResolutionScope:
-        """Compose one exact course reference-resolution scope.
-
-        Parameters
-        ----------
-        manifest
-            Fresh current course authoring manifest.
-        inventory
-            Fresh complete inventory derived from exactly ``manifest``.
-        locator_bindings
-            Exact one-to-one ordered tuple of opaque References-owned locators.
-
-        Returns
-        -------
-        CourseReferenceResolutionScope
-            Immutable selected-reference scope and navigation semantics.
-
-        Raises
-        ------
-        CourseReferenceResolutionError
-            If inputs are stale, incomplete, over limits, or differ in count,
-            order, display status, or locator uniqueness.
-        """
-
+        """Compose one exact course reference-resolution scope."""
+        manifest = request.manifest
+        inventory = request.inventory
+        locator_bindings = request.locator_bindings
         _require_fresh_manifest(manifest)
         _require_fresh_inventory(inventory)
         if inventory.manifest != manifest:
@@ -650,13 +390,6 @@ class CourseReferenceResolutionProjector:
         if inventory.reference_scope_status != "complete":
             raise CourseReferenceResolutionError(
                 "course reference scope inventory must be complete"
-            )
-        if type(locator_bindings) is not tuple or any(
-            type(value) is not CourseReferenceLocatorBinding
-            for value in locator_bindings
-        ):
-            raise CourseReferenceResolutionError(
-                "locator bindings must be an exact immutable tuple"
             )
         planned = manifest.planned_citekeys
         if not planned:
@@ -737,6 +470,116 @@ class CourseReferenceResolutionProjector:
             inventory_id=inventory.inventory_id,
             selections=tuple(selections),
         )
+
+
+def course_reference_resolution_previous_selection_id(
+    scope: CourseReferenceResolutionScope,
+    selection_id: str,
+) -> str | None:
+    """Return the preceding identity in Courses-owned order."""
+    index = _selection_index(scope, selection_id)
+    return None if index == 0 else scope.selections[index - 1].selection_id
+
+
+def course_reference_resolution_next_selection_id(
+    scope: CourseReferenceResolutionScope,
+    selection_id: str,
+) -> str | None:
+    """Return the following identity in Courses-owned order."""
+    index = _selection_index(scope, selection_id)
+    if index + 1 == scope.total:
+        return None
+    return scope.selections[index + 1].selection_id
+
+
+def course_reference_resolution_window(
+    scope: CourseReferenceResolutionScope,
+    *,
+    offset: int,
+    limit: int,
+) -> CourseReferenceResolutionWindow:
+    """Return one deterministic bounded selection window."""
+    _require_nonnegative_int(offset, label="window offset")
+    _require_positive_int(limit, label="window limit")
+    if offset > scope.total:
+        raise CourseReferenceResolutionError("window offset exceeds total")
+    if limit > CourseReferenceResolutionWindow.MAX_WINDOW_SIZE:
+        raise CourseReferenceResolutionError("window limit exceeds its bound")
+    selections = scope.selections[offset : offset + limit]
+    previous_offset = max(0, offset - limit) if offset else None
+    consumed = offset + len(selections)
+    next_offset = consumed if consumed < scope.total else None
+    return CourseReferenceResolutionWindow(
+        scope_id=scope.scope_id,
+        offset=offset,
+        limit=limit,
+        total=scope.total,
+        selections=selections,
+        previous_offset=previous_offset,
+        next_offset=next_offset,
+    )
+
+
+def course_reference_resolution_scope_as_dict(
+    scope: CourseReferenceResolutionScope,
+) -> dict[str, object]:
+    """Return the stable course scope with per-item navigation."""
+    values: list[dict[str, object]] = []
+    for index, selection in enumerate(scope.selections):
+        value = _selection_as_dict(selection)
+        value["previous_selection_id"] = (
+            None if index == 0 else scope.selections[index - 1].selection_id
+        )
+        value["next_selection_id"] = (
+            None
+            if index + 1 == scope.total
+            else scope.selections[index + 1].selection_id
+        )
+        values.append(value)
+    return {
+        "contract_name": scope.CONTRACT_NAME,
+        "contract_version": scope.CONTRACT_VERSION,
+        "course_id": scope.course_id,
+        "course_title": scope.course_title,
+        "inventory_id": scope.inventory_id,
+        "manifest_id": scope.manifest_id,
+        "manifest_sha256": scope.manifest_sha256,
+        "scope_id": scope.scope_id,
+        "selections": values,
+        "total": scope.total,
+    }
+
+
+def _selection_index(
+    scope: CourseReferenceResolutionScope,
+    selection_id: str,
+) -> int:
+    _require_identity(selection_id, label="selection ID")
+    for index, selection in enumerate(scope.selections):
+        if selection.selection_id == selection_id:
+            return index
+    raise CourseReferenceResolutionError(
+        "selection identity is absent from this scope"
+    )
+
+
+def _selection_as_dict(
+    selection: CourseReferenceSelection,
+) -> dict[str, object]:
+    return {
+        "course_id": selection.course_id,
+        "display_citekey": selection.display_citekey,
+        "display_citekey_status": selection.display_citekey_status.value,
+        "inventory_id": selection.inventory_id,
+        "locator_binding_id": selection.locator_binding_id,
+        "manifest_id": selection.manifest_id,
+        "ordinal": selection.ordinal,
+        "origin": selection.origin.value,
+        "reference_locator": selection.reference_locator,
+        "reference_owner": selection.REFERENCE_OWNER,
+        "role": selection.role.value,
+        "selection_id": selection.selection_id,
+    }
 
 
 def _require_fresh_locator_binding(

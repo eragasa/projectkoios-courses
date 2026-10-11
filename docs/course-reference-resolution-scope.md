@@ -14,7 +14,8 @@ allowed mutation operations.
 
 ## Explicit inputs
 
-`CourseReferenceResolutionProjector.project` requires all three inputs:
+`CourseReferenceResolutionActionizer.action` accepts one frozen, slotted
+`CourseReferenceResolutionRequest` containing all three inputs:
 
 1. a fresh `CourseAuthoringManifest`;
 2. a fresh `CourseSourceInventory` derived from exactly that manifest, with
@@ -59,13 +60,33 @@ or evidence-admission assertion.
 
 ## Navigation
 
-The ordered tuple is the only navigation authority. The scope derives previous
-and next selection identities without mutable cursor state. `window` returns a
+The ordered tuple is the only navigation authority. Top-level pure operations
+`course_reference_resolution_previous_selection_id` and
+`course_reference_resolution_next_selection_id` derive adjacent identities
+without mutable cursor state. `course_reference_resolution_window` returns a
 deterministic zero-based bounded slice with previous and next offsets. Window
 limits are positive and at most 100; offsets beyond the total fail closed.
 
-The serialized scope adds derived previous/next IDs to every selection. These
-values are presentation/navigation data, not References authority.
+`course_reference_resolution_scope_as_dict` adds derived previous/next IDs to
+every serialized selection. These values are presentation/navigation data, not
+References authority. Keeping these operations outside the immutable result
+prevents the result from becoming a multi-verb façade.
+
+## Typechecked architecture boundary
+
+Normal strict mypy loads the repository-local
+`tools.course_reference_resolution_mypy` plugin unconditionally. For the
+`projectkoios.courses.reference_resolution` module, mypy rejects private or
+nested classes, private methods, cross-module imports of private names,
+non-nominal class roles, mutable or unslotted data objects, active data objects,
+multi-verb actionizers, factories, and stateful initializers. The permitted
+nominal roles are frozen/slotted passive data objects, action requests, action
+results, single-action actionizers, enums, errors, and action protocols.
+
+Private implementation helpers remain top-level functions. Checked-in
+adversarial and allowed diagnostic fixtures prove both rejection and acceptance
+through mypy itself; pytest only executes and verifies those typechecker
+diagnostics. No central package or external policy tool is required.
 
 ## Composition boundary
 

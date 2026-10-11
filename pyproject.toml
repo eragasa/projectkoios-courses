@@ -49,4 +49,5 @@ mypy_path = "src/python"
 namespace_packages = true
 explicit_package_bases = true
 strict = true
-files = ["src/python", "tests"]
+plugins = ["tools.course_reference_resolution_mypy"]
+files = ["src/python", "tests", "tools"]
